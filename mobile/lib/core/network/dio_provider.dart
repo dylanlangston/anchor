@@ -1,4 +1,6 @@
+import 'dart:io';
 import 'package:dio/dio.dart';
+import 'package:dio/io.dart';
 import 'package:flutter/foundation.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -8,6 +10,19 @@ part 'dio_provider.g.dart';
 
 // Global flag to prevent multiple simultaneous refresh attempts
 bool _isRefreshing = false;
+
+/// Creates an [IOHttpClientAdapter] that accepts all certificates,
+/// including self-signed ones.
+IOHttpClientAdapter createSelfSignedCertAdapter() {
+  return IOHttpClientAdapter(
+    createHttpClient: () {
+      final client = HttpClient();
+      client.badCertificateCallback =
+          (X509Certificate cert, String host, int port) => true;
+      return client;
+    },
+  );
+}
 
 @riverpod
 Dio dio(Ref ref) {
@@ -25,6 +40,13 @@ Dio dio(Ref ref) {
     'Content-Type': 'application/json',
     'Accept': 'application/json',
   };
+
+  // Allow self-signed certificates when the user has enabled the setting
+  final allowSelfSigned =
+      ref.watch(allowSelfSignedCertProvider).value ?? false;
+  if (allowSelfSigned) {
+    dio.httpClientAdapter = createSelfSignedCertAdapter();
+  }
 
   // Add Authorization Interceptor with token refresh
   const storage = FlutterSecureStorage();
@@ -66,6 +88,10 @@ Dio dio(Ref ref) {
                 'Content-Type': 'application/json',
                 'Accept': 'application/json',
               };
+              if (allowSelfSigned) {
+                refreshDio.httpClientAdapter =
+                    createSelfSignedCertAdapter();
+              }
 
               // Call refresh endpoint
               final response = await refreshDio.post(
@@ -178,7 +204,8 @@ DioException _transformError(DioException e) {
       message = 'No internet connection. Please check your network settings.';
       break;
     case DioExceptionType.badCertificate:
-      message = 'Certificate error.';
+      message =
+          'Certificate error. If using a self-signed certificate, enable "Allow self-signed certificates" in server settings.';
       break;
     case DioExceptionType.badResponse:
       // Handle specific status codes

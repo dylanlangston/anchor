@@ -48,13 +48,24 @@ class AllowSelfSignedCertNotifier extends AsyncNotifier<bool> {
 
   @override
   Future<bool> build() async {
-    final value = await _storage.read(key: _allowSelfSignedCertKey);
-    return value == 'true';
+    try {
+      final value = await _storage.read(key: _allowSelfSignedCertKey);
+      return value == 'true';
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> toggle(bool value) async {
-    await _storage.write(key: _allowSelfSignedCertKey, value: value.toString());
     state = AsyncData(value);
+    try {
+      await _storage.write(
+        key: _allowSelfSignedCertKey,
+        value: value.toString(),
+      );
+    } catch (_) {
+      // Ignore storage errors
+    }
   }
 }
 

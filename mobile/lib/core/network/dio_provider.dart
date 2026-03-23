@@ -11,14 +11,20 @@ part 'dio_provider.g.dart';
 // Global flag to prevent multiple simultaneous refresh attempts
 bool _isRefreshing = false;
 
-/// Creates an [IOHttpClientAdapter] that accepts all certificates,
-/// including self-signed ones.
-IOHttpClientAdapter createSelfSignedCertAdapter() {
+/// Creates an [IOHttpClientAdapter] that accepts self-signed/invalid
+/// certificates only for the host derived from [serverUrl].
+/// Requests to any other host will still reject bad certificates.
+IOHttpClientAdapter createSelfSignedCertAdapter(String serverUrl) {
+  final uri = Uri.tryParse(serverUrl);
+  final allowedHost = uri?.host;
+
   return IOHttpClientAdapter(
     createHttpClient: () {
       final client = HttpClient();
       client.badCertificateCallback =
-          (X509Certificate cert, String host, int port) => true;
+          (X509Certificate cert, String host, int port) {
+        return host == allowedHost;
+      };
       return client;
     },
   );
@@ -44,8 +50,8 @@ Dio dio(Ref ref) {
   // Allow self-signed certificates when the user has enabled the setting
   final allowSelfSigned =
       ref.watch(allowSelfSignedCertProvider).value ?? false;
-  if (allowSelfSigned) {
-    dio.httpClientAdapter = createSelfSignedCertAdapter();
+  if (allowSelfSigned && serverUrl != null && serverUrl.isNotEmpty) {
+    dio.httpClientAdapter = createSelfSignedCertAdapter(serverUrl);
   }
 
   // Add Authorization Interceptor with token refresh
@@ -84,13 +90,15 @@ Dio dio(Ref ref) {
               if (serverUrl != null && serverUrl.isNotEmpty) {
                 refreshDio.options.baseUrl = serverUrl;
               }
+              refreshDio.options.connectTimeout = const Duration(seconds: 10);
+              refreshDio.options.receiveTimeout = const Duration(seconds: 10);
               refreshDio.options.headers = {
                 'Content-Type': 'application/json',
                 'Accept': 'application/json',
               };
-              if (allowSelfSigned) {
+              if (allowSelfSigned && serverUrl != null && serverUrl.isNotEmpty) {
                 refreshDio.httpClientAdapter =
-                    createSelfSignedCertAdapter();
+                    createSelfSignedCertAdapter(serverUrl);
               }
 
               // Call refresh endpoint

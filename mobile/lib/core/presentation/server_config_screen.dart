@@ -82,8 +82,9 @@ class _ServerConfigScreenState extends ConsumerState<ServerConfigScreen> {
     dio.options.receiveTimeout = const Duration(seconds: 10);
     final allowSelfSigned =
         ref.read(allowSelfSignedCertProvider).value ?? false;
-    if (allowSelfSigned) {
-      dio.httpClientAdapter = createSelfSignedCertAdapter();
+    final url = _urlController.text.trim();
+    if (allowSelfSigned && url.isNotEmpty) {
+      dio.httpClientAdapter = createSelfSignedCertAdapter(url);
     }
     return dio;
   }

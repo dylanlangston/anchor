@@ -5,11 +5,13 @@ import { UpdateNoteDto } from '../dto/update-note.dto';
 import { SyncNotesDto } from '../dto/sync-notes.dto';
 import { NoteState, NoteSharePermission } from 'src/generated/prisma/enums';
 import { NoteAccessService } from './note-access.service';
+import { NoteAttachmentsService } from './note-attachments.service';
 import { transformNote } from '../utils/note-transformer.util';
 import {
   ERROR_MESSAGES,
   NOTE_INCLUDE_TAGS,
   NOTE_INCLUDE_SHARES,
+  NOTE_INCLUDE_ATTACHMENT_COUNT,
 } from '../constants/notes.constants';
 
 @Injectable()
@@ -17,6 +19,7 @@ export class NotesService {
   constructor(
     private prisma: PrismaService,
     private noteAccessService: NoteAccessService,
+    private noteAttachmentsService: NoteAttachmentsService,
   ) { }
 
   async create(userId: string, createNoteDto: CreateNoteDto) {
@@ -95,6 +98,7 @@ export class NotesService {
       include: {
         ...NOTE_INCLUDE_TAGS,
         ...NOTE_INCLUDE_SHARES,
+        ...NOTE_INCLUDE_ATTACHMENT_COUNT,
       },
       orderBy: [{ isPinned: 'desc' }, { updatedAt: 'desc' }],
       take: normalizedLimit,
@@ -115,6 +119,7 @@ export class NotesService {
       include: {
         ...NOTE_INCLUDE_TAGS,
         ...NOTE_INCLUDE_SHARES,
+        ...NOTE_INCLUDE_ATTACHMENT_COUNT,
       },
     });
 
@@ -211,7 +216,10 @@ export class NotesService {
         state: NoteState.trashed,
       },
       orderBy: { updatedAt: 'desc' },
-      include: NOTE_INCLUDE_TAGS,
+      include: {
+        ...NOTE_INCLUDE_TAGS,
+        ...NOTE_INCLUDE_ATTACHMENT_COUNT,
+      },
     });
 
     return notes.map((note) => transformNote(note, userId));
@@ -226,7 +234,10 @@ export class NotesService {
         isArchived: true,
       },
       orderBy: { updatedAt: 'desc' },
-      include: NOTE_INCLUDE_TAGS,
+      include: {
+        ...NOTE_INCLUDE_TAGS,
+        ...NOTE_INCLUDE_ATTACHMENT_COUNT,
+      },
     });
 
     return notes.map((note) => transformNote(note, userId));
@@ -254,7 +265,21 @@ export class NotesService {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - retentionDays);
 
-    // 1. Purge deleted notes
+    // 1. Find notes to be purged before deleting
+    const notesToPurge = await this.prisma.note.findMany({
+      where: {
+        state: NoteState.deleted,
+        updatedAt: { lt: cutoffDate },
+      },
+      select: { id: true },
+    });
+
+    // 2. Delete attachment files from disk for each note
+    for (const note of notesToPurge) {
+      await this.noteAttachmentsService.deleteAllForNote(note.id);
+    }
+
+    // 3. Purge deleted notes (DB cascade removes NoteAttachment rows)
     const deletedNotes = await this.prisma.note.deleteMany({
       where: {
         state: NoteState.deleted,
@@ -262,7 +287,7 @@ export class NotesService {
       },
     });
 
-    // 2. Purge deleted shares
+    // 4. Purge deleted shares
     const deletedShares = await this.prisma.noteShare.deleteMany({
       where: {
         isDeleted: true,
@@ -425,6 +450,7 @@ export class NotesService {
       include: {
         ...NOTE_INCLUDE_TAGS,
         ...NOTE_INCLUDE_SHARES,
+        ...NOTE_INCLUDE_ATTACHMENT_COUNT,
       },
     });
 
@@ -453,6 +479,7 @@ export class NotesService {
           include: {
             ...NOTE_INCLUDE_TAGS,
             ...NOTE_INCLUDE_SHARES,
+            ...NOTE_INCLUDE_ATTACHMENT_COUNT,
           },
         },
       },

@@ -9,6 +9,8 @@
 [![Version](https://img.shields.io/github/v/release/zhfahim/anchor?label=version)](https://github.com/zhfahim/anchor/releases)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?logo=docker)](https://github.com/zhfahim/anchor)
+[![Discord](https://img.shields.io/discord/1487830114795257906?label=Discord)](https://discord.gg/KbyUEvTTQ)
+
 
 Anchor focuses on speed, privacy, simplicity, and reliability across mobile and web. Notes are stored locally, editable offline, and synced across devices when online.
 
@@ -97,6 +99,28 @@ Anchor focuses on speed, privacy, simplicity, and reliability across mobile and 
 
 4. **Access the app:**
    Open http://localhost:3000
+
+### Pre-release (Beta) Image
+
+To test upcoming features before they are officially released, use the `next` tag:
+
+```yaml
+services:
+  anchor:
+    image: ghcr.io/zhfahim/anchor:next
+    container_name: anchor
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - anchor_data:/data
+
+volumes:
+  anchor_data:
+```
+
+> **Warning:** The `next` image is built from the `next` branch and may contain incomplete features or breaking changes. Do not use it in production. Back up your data before switching.
+
 
 ### Option 2: Building from Source
 
@@ -225,7 +249,7 @@ Future planned features:
 
 If you find Anchor useful, consider supporting its development:
 
-[![Buy me a coffee](https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=☕&slug=zahid&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff)](https://www.buymeacoffee.com/zahid)
+[<img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" height="60">](https://www.buymeacoffee.com/zahid)
 
 
 ## License

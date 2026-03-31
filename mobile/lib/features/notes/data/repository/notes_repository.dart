@@ -44,6 +44,8 @@ class NotesRepository {
   );
 
   String get _lastSyncKey => 'last_synced_at_$_userId';
+  String get _syncProtocolVersionKey => 'sync_protocol_version_$_userId';
+  static const int _currentSyncProtocolVersion = 2;
 
   // Watch only active notes
   // Uses left outer joins to fetch notes, their tags, and image attachment paths
@@ -468,6 +470,36 @@ class NotesRepository {
     sync();
   }
 
+  // One time migrations when sync protocol version changes (e.g. new feature
+  // added server-side that older clients didn't know about).
+  Future<void> _runProtocolMigrations() async {
+    final raw = await _storage.read(key: _syncProtocolVersionKey);
+    final storedVersion = raw != null ? int.tryParse(raw) ?? 1 : 1;
+
+    if (storedVersion < 2) {
+      // Backfill attachment metadata for all existing local notes.
+      // Needed when upgrading from a pre attachments app version that synced
+      // notes without fetching their attachments.
+      final localNoteIds =
+          await (_db.select(_db.notes)
+                ..where((tbl) => tbl.state.isNotValue('deleted')))
+              .map((row) => row.id)
+              .get();
+
+      if (localNoteIds.isNotEmpty) {
+        await _attachmentsRepo.fetchAttachmentsForNotes(localNoteIds);
+      }
+    }
+
+    // Only persist after all migrations succeed so failures retry next sync.
+    if (storedVersion < _currentSyncProtocolVersion) {
+      await _storage.write(
+        key: _syncProtocolVersionKey,
+        value: _currentSyncProtocolVersion.toString(),
+      );
+    }
+  }
+
   // Bi-directional sync with server
   Future<void> sync() async {
     try {
@@ -639,6 +671,9 @@ class NotesRepository {
 
       // 8. Save new sync timestamp
       await _storage.write(key: _lastSyncKey, value: syncedAt);
+
+      // 9. Run any pending protocol migrations
+      await _runProtocolMigrations();
     } catch (e) {
       // Sync failed, will retry later (handled by sync loop)
     }

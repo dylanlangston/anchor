@@ -1,9 +1,11 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 part 'server_config_provider.g.dart';
 
 const _serverUrlKey = 'server_url';
+const _allowSelfSignedCertKey = 'allow_self_signed_cert';
 
 @riverpod
 class ServerConfig extends _$ServerConfig {
@@ -38,3 +40,36 @@ String? serverUrl(Ref ref) {
   final config = ref.watch(serverConfigProvider);
   return config.value;
 }
+
+/// Manages the "allow self-signed certificates" setting.
+/// When enabled, Dio will accept invalid/self-signed TLS certificates.
+class AllowSelfSignedCertNotifier extends AsyncNotifier<bool> {
+  final _storage = const FlutterSecureStorage();
+
+  @override
+  Future<bool> build() async {
+    try {
+      final value = await _storage.read(key: _allowSelfSignedCertKey);
+      return value == 'true';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> toggle(bool value) async {
+    state = AsyncData(value);
+    try {
+      await _storage.write(
+        key: _allowSelfSignedCertKey,
+        value: value.toString(),
+      );
+    } catch (_) {
+      // Ignore storage errors
+    }
+  }
+}
+
+final allowSelfSignedCertProvider =
+    AsyncNotifierProvider<AllowSelfSignedCertNotifier, bool>(
+      AllowSelfSignedCertNotifier.new,
+    );

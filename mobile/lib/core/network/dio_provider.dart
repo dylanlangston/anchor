@@ -1,4 +1,6 @@
+import 'dart:io';
 import 'package:dio/dio.dart';
+import 'package:dio/io.dart';
 import 'package:flutter/foundation.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -8,6 +10,25 @@ part 'dio_provider.g.dart';
 
 // Global flag to prevent multiple simultaneous refresh attempts
 bool _isRefreshing = false;
+
+/// Creates an [IOHttpClientAdapter] that accepts self-signed/invalid
+/// certificates only for the host derived from [serverUrl].
+/// Requests to any other host will still reject bad certificates.
+IOHttpClientAdapter createSelfSignedCertAdapter(String serverUrl) {
+  final uri = Uri.tryParse(serverUrl);
+  final allowedHost = uri?.host;
+
+  return IOHttpClientAdapter(
+    createHttpClient: () {
+      final client = HttpClient();
+      client.badCertificateCallback =
+          (X509Certificate cert, String host, int port) {
+        return host == allowedHost;
+      };
+      return client;
+    },
+  );
+}
 
 @riverpod
 Dio dio(Ref ref) {
@@ -25,6 +46,13 @@ Dio dio(Ref ref) {
     'Content-Type': 'application/json',
     'Accept': 'application/json',
   };
+
+  // Allow self-signed certificates when the user has enabled the setting
+  final allowSelfSigned =
+      ref.watch(allowSelfSignedCertProvider).value ?? false;
+  if (allowSelfSigned && serverUrl != null && serverUrl.isNotEmpty) {
+    dio.httpClientAdapter = createSelfSignedCertAdapter(serverUrl);
+  }
 
   // Add Authorization Interceptor with token refresh
   const storage = FlutterSecureStorage();
@@ -62,10 +90,16 @@ Dio dio(Ref ref) {
               if (serverUrl != null && serverUrl.isNotEmpty) {
                 refreshDio.options.baseUrl = serverUrl;
               }
+              refreshDio.options.connectTimeout = const Duration(seconds: 10);
+              refreshDio.options.receiveTimeout = const Duration(seconds: 10);
               refreshDio.options.headers = {
                 'Content-Type': 'application/json',
                 'Accept': 'application/json',
               };
+              if (allowSelfSigned && serverUrl != null && serverUrl.isNotEmpty) {
+                refreshDio.httpClientAdapter =
+                    createSelfSignedCertAdapter(serverUrl);
+              }
 
               // Call refresh endpoint
               final response = await refreshDio.post(
@@ -178,7 +212,8 @@ DioException _transformError(DioException e) {
       message = 'No internet connection. Please check your network settings.';
       break;
     case DioExceptionType.badCertificate:
-      message = 'Certificate error.';
+      message =
+          'Certificate error. If using a self-signed certificate, enable "Allow self-signed certificates" in server settings.';
       break;
     case DioExceptionType.badResponse:
       // Handle specific status codes

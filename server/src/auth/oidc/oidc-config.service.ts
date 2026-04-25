@@ -113,7 +113,17 @@ export class OidcConfigService {
    * Used by OIDC callback URL, frontend redirects, and redirect validation.
    */
   getAppUrl(): string {
-    return this.configService.get<string>('APP_URL') || 'http://localhost:3000';
+    const raw =
+      this.configService.get<string>('APP_URL')?.trim() ||
+      'http://localhost:3000';
+    return raw.replace(/\/+$/, '');
+  }
+
+  /**
+   * OIDC redirect URI
+   */
+  getOidcCallbackUrl(): string {
+    return `${this.getAppUrl()}/api/auth/oidc/callback`;
   }
 
   /**
@@ -153,6 +163,7 @@ export class OidcConfigService {
     issuerUrl?: string;
     clientId?: string;
     hasClientSecret: boolean;
+    callbackUrl: string;
     disableInternalAuth: boolean;
     isLocked: boolean;
     source: 'env' | 'database' | 'default';
@@ -166,6 +177,7 @@ export class OidcConfigService {
       issuerUrl: config.issuerUrl,
       clientId: config.clientId,
       hasClientSecret: !!config.clientSecret,
+      callbackUrl: this.getOidcCallbackUrl(),
       disableInternalAuth: config.disableInternalAuth,
       isLocked: locked,
       source: locked ? 'env' : 'database',

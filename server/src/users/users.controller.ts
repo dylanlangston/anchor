@@ -6,7 +6,7 @@ import { UsersService } from './users.service';
 @Controller('api/users')
 @UseGuards(AuthGuard)
 export class UsersController {
-  constructor(private usersService: UsersService) { }
+  constructor(private usersService: UsersService) {}
 
   @Get('search')
   searchUsers(
@@ -14,5 +14,10 @@ export class UsersController {
     @Query('q') searchQuery?: string,
   ) {
     return this.usersService.searchUsers(searchQuery || '', userId);
+  }
+
+  @Get('recent-contacts')
+  getRecentContacts(@CurrentUser('id') userId: string) {
+    return this.usersService.getRecentContacts(userId);
   }
 }

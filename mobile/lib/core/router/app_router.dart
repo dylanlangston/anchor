@@ -8,11 +8,14 @@ import '../../features/auth/presentation/edit_profile_screen.dart';
 import '../../features/notes/domain/note.dart';
 import '../../features/notes/presentation/notes_list_screen.dart';
 import '../../features/notes/presentation/note_edit_screen.dart';
+import '../../features/notes/presentation/note_history_screen.dart';
+import '../../features/notes/presentation/note_revision_screen.dart';
 import '../../features/notes/presentation/trash_screen.dart';
 import '../../features/notes/presentation/archive_screen.dart';
-import '../presentation/splash_screen.dart';
+import '../app_initializer.dart';
 import '../presentation/server_config_screen.dart';
 import '../../features/settings/presentation/settings_screen.dart';
+import '../../features/settings/presentation/log_viewer_screen.dart';
 import '../../features/auth/presentation/auth_controller.dart';
 import '../network/server_config_provider.dart';
 import 'app_routes.dart';
@@ -52,14 +55,10 @@ GoRouter goRouter(Ref ref) {
 
   return GoRouter(
     navigatorKey: routerKey,
-    initialLocation: AppRoutes.splash,
+    initialLocation: initialRoute,
     refreshListenable: listenable,
     debugLogDiagnostics: true,
     routes: [
-      GoRoute(
-        path: AppRoutes.splash,
-        builder: (context, state) => const SplashScreen(),
-      ),
       GoRoute(
         path: AppRoutes.serverConfig,
         builder: (context, state) {
@@ -77,11 +76,30 @@ GoRouter goRouter(Ref ref) {
           ),
           GoRoute(
             path: AppRoutes.noteEdit,
-            builder: (context, state) {
+            pageBuilder: (context, state) {
               final id = state.pathParameters['id'];
               final note = state.extra as Note?;
-              return NoteEditScreen(noteId: id, note: note);
+              return MaterialPage(
+                key: ValueKey('note/$id'),
+                child: NoteEditScreen(noteId: id, note: note),
+              );
             },
+            routes: [
+              GoRoute(
+                path: AppRoutes.noteHistory,
+                builder: (context, state) =>
+                    NoteHistoryScreen(noteId: state.pathParameters['id']!),
+                routes: [
+                  GoRoute(
+                    path: AppRoutes.noteRevision,
+                    builder: (context, state) => NoteRevisionScreen(
+                      noteId: state.pathParameters['id']!,
+                      revisionId: state.pathParameters['revisionId']!,
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
           GoRoute(
             path: AppRoutes.trash,
@@ -103,6 +121,10 @@ GoRouter goRouter(Ref ref) {
                 path: AppRoutes.editProfile,
                 builder: (context, state) => const EditProfileScreen(),
               ),
+              GoRoute(
+                path: AppRoutes.viewLogs,
+                builder: (context, state) => const LogViewerScreen(),
+              ),
             ],
           ),
         ],
@@ -115,6 +137,25 @@ GoRouter goRouter(Ref ref) {
         path: AppRoutes.register,
         builder: (context, state) => const RegisterScreen(),
       ),
+      GoRoute(
+        path: AppRoutes.widgetNoteNew,
+        pageBuilder: (context, state) {
+          return MaterialPage(
+            key: ValueKey('widget-note-new/${state.uri.query}'),
+            child: const NoteEditScreen(),
+          );
+        },
+      ),
+      GoRoute(
+        path: AppRoutes.widgetNote,
+        pageBuilder: (context, state) {
+          final id = state.pathParameters['id'];
+          return MaterialPage(
+            key: ValueKey('widget-note/$id'),
+            child: NoteEditScreen(noteId: id),
+          );
+        },
+      ),
     ],
     redirect: (context, state) {
       final authState = ref.read(authControllerProvider);
@@ -123,9 +164,10 @@ GoRouter goRouter(Ref ref) {
       final isAuthLoading = authState.isLoading;
       final isConfigLoading = configState.isLoading;
 
-      // If still loading initial state, stay on splash.
-      // This also prevents redirecting while a specialized loading state
-      // (like signing in) is active, preserving user input on the screen.
+      // While the initial state loads (local storage reads, no network) stay
+      // on the pre-computed initial route. This also prevents redirecting
+      // while a specialized loading state (like signing in) is active,
+      // preserving user input on the screen.
       if (isAuthLoading || isConfigLoading) {
         return null;
       }
@@ -133,7 +175,6 @@ GoRouter goRouter(Ref ref) {
       final hasServerUrl = configState.value?.isNotEmpty == true;
       final isLoggedIn = authState.value != null;
 
-      final isSplash = state.matchedLocation == AppRoutes.splash;
       final isServerConfig = state.matchedLocation == AppRoutes.serverConfig;
       final isLogin = state.matchedLocation == AppRoutes.login;
       final isRegister = state.matchedLocation == AppRoutes.register;
@@ -153,8 +194,8 @@ GoRouter goRouter(Ref ref) {
       }
 
       // 3. Logged In
-      // Redirect splash, login, register to home
-      if (isSplash || isLogin || isRegister) {
+      // Redirect login and register to home
+      if (isLogin || isRegister) {
         return AppRoutes.home;
       }
 

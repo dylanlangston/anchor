@@ -1,51 +1,47 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:dio/dio.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:drift/drift.dart' as drift;
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+
 import '../../../../core/database/app_database.dart';
-import '../../../../core/network/dio_provider.dart';
-import '../../../../core/providers/active_user_id_provider.dart';
+import '../../../../core/logging/app_logger.dart';
+import '../../../../core/network/sync_requester.dart';
+import '../../../tags/data/repository/tags_repository.dart';
 import '../../domain/note.dart' as domain;
 import '../../domain/note_attachment.dart' as domain;
-import '../../../tags/data/repository/tags_repository.dart';
+import '../../domain/note_revision.dart';
+import '../local/reminder_slots.dart';
 import 'note_attachments_repository.dart';
+import 'note_revisions_store.dart';
 
 part 'notes_repository.g.dart';
 
 @riverpod
 NotesRepository notesRepository(Ref ref) {
   final db = ref.watch(appDatabaseProvider);
-  final dio = ref.watch(dioProvider);
-  const storage = FlutterSecureStorage();
   final tagsRepo = ref.watch(tagsRepositoryProvider);
   final attachmentsRepo = ref.watch(noteAttachmentsRepositoryProvider);
-  final userId = ref.watch(activeUserIdProvider)!;
-  return NotesRepository(db, dio, storage, tagsRepo, attachmentsRepo, userId);
+  final revisions = ref.watch(noteRevisionsStoreProvider);
+  return NotesRepository(db, tagsRepo, attachmentsRepo, revisions);
 }
 
+/// Notes on the device. Nothing here talks to the server.
 class NotesRepository {
   final AppDatabase _db;
-  final Dio _dio;
-  final FlutterSecureStorage _storage;
   final TagsRepository _tagsRepo;
   final NoteAttachmentsRepository _attachmentsRepo;
-  final String _userId;
+  final NoteRevisionsStore _revisions;
 
   NotesRepository(
     this._db,
-    this._dio,
-    this._storage,
     this._tagsRepo,
     this._attachmentsRepo,
-    this._userId,
+    this._revisions,
   );
 
-  String get _lastSyncKey => 'last_synced_at_$_userId';
-  String get _syncProtocolVersionKey => 'sync_protocol_version_$_userId';
-  static const int _currentSyncProtocolVersion = 2;
+  drift.Expression<int> get _nextRev =>
+      _db.notes.localRev + const drift.Constant(1);
 
   // Watch only active notes
   // Uses left outer joins to fetch notes, their tags, and image attachment paths
@@ -86,6 +82,10 @@ class NotesRepository {
       ),
       drift.OrderingTerm(
         expression: _db.notes.updatedAt,
+        mode: drift.OrderingMode.desc,
+      ),
+      drift.OrderingTerm(
+        expression: _db.notes.id,
         mode: drift.OrderingMode.desc,
       ),
       drift.OrderingTerm(
@@ -168,6 +168,10 @@ class NotesRepository {
           ..orderBy([
             drift.OrderingTerm(
               expression: _db.notes.updatedAt,
+              mode: drift.OrderingMode.desc,
+            ),
+            drift.OrderingTerm(
+              expression: _db.notes.id,
               mode: drift.OrderingMode.desc,
             ),
             drift.OrderingTerm(
@@ -257,6 +261,10 @@ class NotesRepository {
               mode: drift.OrderingMode.desc,
             ),
             drift.OrderingTerm(
+              expression: _db.notes.id,
+              mode: drift.OrderingMode.desc,
+            ),
+            drift.OrderingTerm(
               expression: _db.noteAttachments.position,
               mode: drift.OrderingMode.asc,
             ),
@@ -314,370 +322,306 @@ class NotesRepository {
   }
 
   Future<domain.Note?> getNote(String id) async {
-    final row = await (_db.select(
-      _db.notes,
-    )..where((tbl) => tbl.id.equals(id))).getSingleOrNull();
+    final row = await _noteRow(id);
     if (row == null) return null;
     final tagIds = await _tagsRepo.getTagIdsForNote(id);
     return _mapToDomain(row, tagIds);
   }
 
+  /// One note and its tags, re-emitted whenever either changes.
+  Stream<domain.Note?> watchNote(String id) {
+    final query = _db.select(_db.notes).join([
+      drift.leftOuterJoin(
+        _db.noteTags,
+        _db.noteTags.noteId.equalsExp(_db.notes.id),
+      ),
+    ])..where(_db.notes.id.equals(id));
+
+    return query.watch().map((rows) {
+      if (rows.isEmpty) return null;
+
+      final tagIds = <String>[];
+      for (final row in rows) {
+        final tagId = row.readTableOrNull(_db.noteTags)?.tagId;
+        if (tagId != null && !tagIds.contains(tagId)) {
+          tagIds.add(tagId);
+        }
+      }
+
+      return _mapToDomain(rows.first.readTable(_db.notes), tagIds);
+    });
+  }
+
   Future<void> createNote(domain.Note note) async {
-    final noteWithTimestamp = note.copyWith(
-      updatedAt: DateTime.now(),
-      state: domain.NoteState.active,
+    await _db.transaction(() async {
+      await _db
+          .into(_db.notes)
+          .insert(
+            NotesCompanion.insert(
+              id: note.id,
+              title: note.title,
+              content: drift.Value(note.content),
+              isPinned: drift.Value(note.isPinned),
+              isArchived: drift.Value(note.isArchived),
+              background: drift.Value(note.background),
+              state: drift.Value(domain.NoteState.active.name),
+              updatedAt: drift.Value(DateTime.now().toUtc()),
+              isSynced: const drift.Value(false),
+              localRev: const drift.Value(1),
+              // The server creates notes unpinned, so a pin has to follow.
+              isPinSynced: drift.Value(!note.isPinned),
+            ),
+            mode: drift.InsertMode.insertOrReplace,
+          );
+      await _tagsRepo.setTagsForNote(note.id, note.tagIds);
+    });
+
+    AppLogger.instance.info(
+      'Notes',
+      'createNote id=${note.id} title.len=${note.title.length} '
+          'content.len=${note.content?.length ?? 0} tags=${note.tagIds.length}',
     );
 
-    // Save locally with generated ID
-    await _db
-        .into(_db.notes)
-        .insert(
-          _mapToData(noteWithTimestamp, isSynced: false),
-          mode: drift.InsertMode.insertOrReplace,
-        );
-    await _tagsRepo.setTagsForNote(note.id, note.tagIds);
-
-    // Trigger sync in background
-    sync();
+    scheduleAppSync(trigger: 'NotesRepo.createNote');
   }
 
   Future<void> updateNote(domain.Note note) async {
-    final noteWithTimestamp = note.copyWith(updatedAt: DateTime.now());
+    await _db.transaction(() async {
+      final prior = await _noteRow(note.id);
+      if (prior == null) return;
 
-    await _db
-        .update(_db.notes)
-        .replace(_mapToData(noteWithTimestamp, isSynced: false));
-    await _tagsRepo.setTagsForNote(note.id, note.tagIds);
+      if (prior.title != note.title || prior.content != note.content) {
+        await _revisions.record(prior);
+      }
 
-    // Trigger sync in background
-    sync();
+      await (_db.update(
+        _db.notes,
+      )..where((tbl) => tbl.id.equals(note.id))).write(
+        NotesCompanion(
+          title: drift.Value(note.title),
+          content: drift.Value(note.content),
+          isPinned: drift.Value(note.isPinned),
+          isArchived: drift.Value(note.isArchived),
+          background: drift.Value(note.background),
+          state: drift.Value(note.state.name),
+          updatedAt: drift.Value(DateTime.now().toUtc()),
+          isSynced: const drift.Value(false),
+          localRev: drift.Value(prior.localRev + 1),
+          isPinSynced: prior.isPinned == note.isPinned
+              ? const drift.Value.absent()
+              : const drift.Value(false),
+        ),
+      );
+      await _tagsRepo.setTagsForNote(note.id, note.tagIds);
+    });
+
+    AppLogger.instance.info(
+      'Notes',
+      'updateNote id=${note.id} title.len=${note.title.length} '
+          'content.len=${note.content?.length ?? 0} tags=${note.tagIds.length}',
+    );
+
+    scheduleAppSync(trigger: 'NotesRepo.updateNote');
+  }
+
+  /// Puts an earlier version back on the note. What it says now is kept as a
+  /// version of its own.
+  Future<void> restoreVersion(String noteId, NoteRevision revision) async {
+    await _db.transaction(() async {
+      final prior = await _noteRow(noteId);
+      if (prior == null) return;
+      if (prior.title == revision.title && prior.content == revision.content) {
+        return;
+      }
+
+      await _revisions.record(prior, cause: RevisionCause.restore);
+      await (_db.update(
+        _db.notes,
+      )..where((tbl) => tbl.id.equals(noteId))).write(
+        NotesCompanion(
+          title: drift.Value(revision.title),
+          content: drift.Value(revision.content),
+          updatedAt: drift.Value(DateTime.now().toUtc()),
+          isSynced: const drift.Value(false),
+          localRev: drift.Value(prior.localRev + 1),
+        ),
+      );
+    });
+
+    AppLogger.instance.info(
+      'Notes',
+      'restoreVersion id=$noteId revision=${revision.id}',
+    );
+
+    scheduleAppSync(trigger: 'NotesRepo.restoreVersion');
   }
 
   // Soft delete - moves note to trash
   Future<void> deleteNote(String id) async {
-    final now = DateTime.now();
-
-    await (_db.update(_db.notes)..where((tbl) => tbl.id.equals(id))).write(
-      NotesCompanion(
-        state: const drift.Value('trashed'),
-        updatedAt: drift.Value(now),
-        isSynced: const drift.Value(false),
-      ),
-    );
-
-    sync();
+    await _writeState(ids: [id], state: 'trashed');
+    scheduleAppSync(trigger: 'NotesRepo.deleteNote');
   }
 
   // Restore from trash
   Future<void> restoreNote(String id) async {
-    final now = DateTime.now();
+    await _writeState(ids: [id], state: 'active');
+    scheduleAppSync(trigger: 'NotesRepo.restoreNote');
+  }
 
-    await (_db.update(_db.notes)..where((tbl) => tbl.id.equals(id))).write(
-      NotesCompanion(
-        state: const drift.Value('active'),
-        updatedAt: drift.Value(now),
-        isSynced: const drift.Value(false),
-      ),
+  /// Sets or clears the reminder on a note, leaving the note itself alone.
+  Future<void> setReminder(String noteId, domain.NoteReminder? reminder) async {
+    await _db.transaction(() async {
+      final prior = await _noteRow(noteId);
+      if (prior == null) return;
+
+      final slot = reminder == null
+          ? null
+          : await ensureReminderSlot(_db, noteId);
+
+      await (_db.update(
+        _db.notes,
+      )..where((tbl) => tbl.id.equals(noteId))).write(
+        NotesCompanion(
+          reminderAt: drift.Value(reminder?.remindAt),
+          reminderRecurrence: drift.Value(reminder?.recurrence.name),
+          isReminderSynced: const drift.Value(false),
+          reminderSlot: slot == null
+              ? const drift.Value.absent()
+              : drift.Value(slot),
+        ),
+      );
+    });
+
+    AppLogger.instance.info(
+      'Notes',
+      'setReminder id=$noteId at=${reminder?.remindAt ?? 'none'} '
+          'repeat=${reminder?.recurrence.name ?? 'none'}',
     );
-
-    sync();
+    scheduleAppSync(trigger: 'NotesRepo.setReminder');
   }
 
   // Archive a note
   Future<void> archiveNote(String id) async {
-    final now = DateTime.now();
-
-    await (_db.update(_db.notes)..where((tbl) => tbl.id.equals(id))).write(
-      NotesCompanion(
-        isArchived: const drift.Value(true),
-        updatedAt: drift.Value(now),
-        isSynced: const drift.Value(false),
-      ),
-    );
-
-    sync();
+    await _writeArchived(ids: [id], isArchived: true);
+    scheduleAppSync(trigger: 'NotesRepo.archiveNote');
   }
 
   // Unarchive a note
   Future<void> unarchiveNote(String id) async {
-    final now = DateTime.now();
-
-    await (_db.update(_db.notes)..where((tbl) => tbl.id.equals(id))).write(
-      NotesCompanion(
-        isArchived: const drift.Value(false),
-        updatedAt: drift.Value(now),
-        isSynced: const drift.Value(false),
-      ),
-    );
-
-    sync();
+    await _writeArchived(ids: [id], isArchived: false);
+    scheduleAppSync(trigger: 'NotesRepo.unarchiveNote');
   }
 
   // Bulk delete notes
   Future<int> bulkDeleteNotes(List<String> ids) async {
     if (ids.isEmpty) return 0;
-    final now = DateTime.now();
-
-    await (_db.update(_db.notes)..where((tbl) => tbl.id.isIn(ids))).write(
-      NotesCompanion(
-        state: const drift.Value('trashed'),
-        updatedAt: drift.Value(now),
-        isSynced: const drift.Value(false),
-      ),
-    );
-
-    sync();
+    await _writeState(ids: ids, state: 'trashed');
+    scheduleAppSync(trigger: 'NotesRepo.bulkDeleteNotes');
     return ids.length;
   }
 
   // Bulk archive notes
   Future<int> bulkArchiveNotes(List<String> ids) async {
     if (ids.isEmpty) return 0;
-    final now = DateTime.now();
-
-    await (_db.update(_db.notes)..where((tbl) => tbl.id.isIn(ids))).write(
-      NotesCompanion(
-        isArchived: const drift.Value(true),
-        updatedAt: drift.Value(now),
-        isSynced: const drift.Value(false),
-      ),
-    );
-
-    sync();
+    await _writeArchived(ids: ids, isArchived: true);
+    scheduleAppSync(trigger: 'NotesRepo.bulkArchiveNotes');
     return ids.length;
   }
 
-  // Permanent delete - sets state to deleted (tombstone)
-  // The note will be removed locally after sync confirms server received it
-  Future<void> permanentDelete(String id) async {
-    // Clean up local attachment files and DB records
-    await _attachmentsRepo.deleteAllLocalForNote(id);
+  // Pins sync on their own, so the note itself is left alone.
+  Future<int> bulkSetPinned(List<String> ids, bool isPinned) async {
+    if (ids.isEmpty) return 0;
 
-    final now = DateTime.now();
-    await (_db.update(_db.notes)..where((tbl) => tbl.id.equals(id))).write(
+    await (_db.update(_db.notes)..where((tbl) => tbl.id.isIn(ids))).write(
       NotesCompanion(
-        state: const drift.Value('deleted'),
-        updatedAt: drift.Value(now),
-        isSynced: const drift.Value(false),
+        isPinned: drift.Value(isPinned),
+        isPinSynced: const drift.Value(false),
       ),
     );
 
-    // Remove tag associations immediately for local UI
+    scheduleAppSync(trigger: 'NotesRepo.bulkSetPinned');
+    return ids.length;
+  }
+
+  // Bulk add tags to notes (merge — each note keeps its existing tags)
+  Future<int> bulkAddTags(List<String> ids, List<String> tagIds) async {
+    if (ids.isEmpty || tagIds.isEmpty) return 0;
+
+    await _db.transaction(() async {
+      // insertOrReplace on the (noteId, tagId) key makes this idempotent.
+      await _db.batch((batch) {
+        for (final noteId in ids) {
+          batch.insertAll(
+            _db.noteTags,
+            tagIds
+                .map(
+                  (tagId) => NoteTagsCompanion(
+                    noteId: drift.Value(noteId),
+                    tagId: drift.Value(tagId),
+                  ),
+                )
+                .toList(),
+            mode: drift.InsertMode.insertOrReplace,
+          );
+        }
+      });
+
+      await (_db.update(_db.notes)..where((tbl) => tbl.id.isIn(ids))).write(
+        NotesCompanion.custom(
+          updatedAt: drift.Variable(DateTime.now().toUtc()),
+          isSynced: const drift.Constant(false),
+          localRev: _nextRev,
+        ),
+      );
+    });
+
+    scheduleAppSync(trigger: 'NotesRepo.bulkAddTags');
+    return ids.length;
+  }
+
+  // Marked deleted here; the row goes once the server has been told.
+  Future<void> permanentDelete(String id) async {
+    await _attachmentsRepo.deleteAllLocalForNote(id);
+    await _revisions.deleteForNote(id);
+    await _writeState(ids: [id], state: 'deleted');
     await (_db.delete(
       _db.noteTags,
     )..where((tbl) => tbl.noteId.equals(id))).go();
 
-    sync();
+    scheduleAppSync(trigger: 'NotesRepo.permanentDelete');
   }
 
-  // One time migrations when sync protocol version changes (e.g. new feature
-  // added server-side that older clients didn't know about).
-  Future<void> _runProtocolMigrations() async {
-    final raw = await _storage.read(key: _syncProtocolVersionKey);
-    final storedVersion = raw != null ? int.tryParse(raw) ?? 1 : 1;
-
-    if (storedVersion < 2) {
-      // Backfill attachment metadata for all existing local notes.
-      // Needed when upgrading from a pre attachments app version that synced
-      // notes without fetching their attachments.
-      final localNoteIds =
-          await (_db.select(_db.notes)
-                ..where((tbl) => tbl.state.isNotValue('deleted')))
-              .map((row) => row.id)
-              .get();
-
-      if (localNoteIds.isNotEmpty) {
-        await _attachmentsRepo.fetchAttachmentsForNotes(localNoteIds);
-      }
-    }
-
-    // Only persist after all migrations succeed so failures retry next sync.
-    if (storedVersion < _currentSyncProtocolVersion) {
-      await _storage.write(
-        key: _syncProtocolVersionKey,
-        value: _currentSyncProtocolVersion.toString(),
-      );
-    }
+  Future<void> _writeState({
+    required List<String> ids,
+    required String state,
+  }) async {
+    await (_db.update(_db.notes)..where((tbl) => tbl.id.isIn(ids))).write(
+      NotesCompanion.custom(
+        state: drift.Constant(state),
+        updatedAt: drift.Variable(DateTime.now().toUtc()),
+        isSynced: const drift.Constant(false),
+        localRev: _nextRev,
+      ),
+    );
   }
 
-  // Bi-directional sync with server
-  Future<void> sync() async {
-    try {
-      // 1. Get last sync timestamp
-      final lastSyncedAt = await _storage.read(key: _lastSyncKey);
-
-      // 2. Get all unsynced local notes (including tombstones)
-      final unsyncedRows = await (_db.select(
-        _db.notes,
-      )..where((tbl) => tbl.isSynced.equals(false))).get();
-
-      final localChanges = <Map<String, dynamic>>[];
-      for (final row in unsyncedRows) {
-        final tagIds = await _tagsRepo.getTagIdsForNote(row.id);
-        final note = _mapToDomain(row, tagIds);
-        localChanges.add({
-          'id': note.id,
-          'title': note.title,
-          'content': note.content,
-          'isPinned': note.isPinned,
-          'isArchived': note.isArchived,
-          'background': note.background,
-          'state': note.state.name,
-          'tagIds': note.tagIds,
-          'updatedAt': note.updatedAt?.toIso8601String(),
-        });
-      }
-
-      // 3. Send sync request to server
-      final response = await _dio.post(
-        '/api/notes/sync',
-        data: {'lastSyncedAt': lastSyncedAt, 'changes': localChanges},
-      );
-
-      final data = response.data as Map<String, dynamic>;
-      final serverChanges = (data['serverChanges'] as List)
-          .map((e) => domain.Note.fromJson(e as Map<String, dynamic>))
-          .toList();
-      final revokedNoteIds =
-          (data['revokedSharedNoteIds'] as List?)?.cast<String>() ?? [];
-      final syncedAt = data['syncedAt'] as String;
-
-      final processedIds =
-          (data['processedIds'] as List?)?.cast<String>() ?? [];
-
-      final noteIdsForFileCleanup = <String>[];
-
-      // 4. Process server changes
-      await _db.transaction(() async {
-        // First handle revocations - delete these notes
-        for (final revokedId in revokedNoteIds) {
-          // Remove attachment rows so reactive streams update immediately
-          await (_db.delete(
-            _db.noteAttachments,
-          )..where((tbl) => tbl.noteId.equals(revokedId))).go();
-          await (_db.delete(
-            _db.noteTags,
-          )..where((tbl) => tbl.noteId.equals(revokedId))).go();
-          await (_db.delete(
-            _db.notes,
-          )..where((tbl) => tbl.id.equals(revokedId))).go();
-          noteIdsForFileCleanup.add(revokedId);
-        }
-
-        for (final serverNote in serverChanges) {
-          // If server note is deleted (tombstone), remove it locally
-          if (serverNote.isDeleted) {
-            await (_db.delete(
-              _db.noteAttachments,
-            )..where((tbl) => tbl.noteId.equals(serverNote.id))).go();
-            await (_db.delete(
-              _db.noteTags,
-            )..where((tbl) => tbl.noteId.equals(serverNote.id))).go();
-            await (_db.delete(
-              _db.notes,
-            )..where((tbl) => tbl.id.equals(serverNote.id))).go();
-            noteIdsForFileCleanup.add(serverNote.id);
-            continue;
-          }
-
-          final localNote = await (_db.select(
-            _db.notes,
-          )..where((tbl) => tbl.id.equals(serverNote.id))).getSingleOrNull();
-
-          if (localNote == null) {
-            // Note doesn't exist locally - insert it
-            await _db
-                .into(_db.notes)
-                .insert(
-                  _mapToData(serverNote, isSynced: true),
-                  mode: drift.InsertMode.insertOrReplace,
-                );
-            await _tagsRepo.setTagsForNote(serverNote.id, serverNote.tagIds);
-          } else {
-            // Note exists - compare timestamps
-            final serverUpdatedAt = serverNote.updatedAt;
-            final localUpdatedAt = localNote.updatedAt;
-
-            // Server wins if it's newer or equal (server is source of truth)
-            if (serverUpdatedAt != null &&
-                (localUpdatedAt == null ||
-                    serverUpdatedAt.isAfter(localUpdatedAt) ||
-                    serverUpdatedAt.isAtSameMomentAs(localUpdatedAt))) {
-              await (_db.update(
-                _db.notes,
-              )..where((tbl) => tbl.id.equals(serverNote.id))).write(
-                NotesCompanion(
-                  title: drift.Value(serverNote.title),
-                  content: drift.Value(serverNote.content),
-                  isPinned: drift.Value(serverNote.isPinned),
-                  isArchived: drift.Value(serverNote.isArchived),
-                  background: drift.Value(serverNote.background),
-                  state: drift.Value(serverNote.state.name),
-                  updatedAt: drift.Value(serverNote.updatedAt),
-                  permission: drift.Value(serverNote.permission.name),
-                  shareIds: drift.Value(jsonEncode(serverNote.shareIds ?? [])),
-                  sharedById: drift.Value(serverNote.sharedBy?.id),
-                  sharedByName: drift.Value(serverNote.sharedBy?.name),
-                  sharedByEmail: drift.Value(serverNote.sharedBy?.email),
-                  sharedByProfileImage: drift.Value(
-                    serverNote.sharedBy?.profileImage,
-                  ),
-                  isSynced: const drift.Value(true),
-                ),
-              );
-              await _tagsRepo.setTagsForNote(serverNote.id, serverNote.tagIds);
-            }
-          }
-        }
-      });
-
-      // Clean up local attachment files for revoked/deleted notes after the
-      // transaction has committed
-      for (final noteId in noteIdsForFileCleanup) {
-        await _attachmentsRepo.deleteLocalFilesForNote(noteId);
-      }
-
-      // 5. Sync pending attachment uploads and deletes with server
-      await _attachmentsRepo.sync();
-
-      // 6. Fetch fresh attachment metadata for notes that changed this cycle
-      await _attachmentsRepo.fetchAttachmentsForNotes(
-        serverChanges.where((n) => !n.isDeleted).map((n) => n.id).toList(),
-      );
-
-      // 7. Mark notes as synced
-      await _db.transaction(() async {
-        for (final id in processedIds) {
-          final note = await (_db.select(
-            _db.notes,
-          )..where((tbl) => tbl.id.equals(id))).getSingleOrNull();
-          if (note != null && note.state == 'deleted') {
-            await (_db.delete(
-              _db.noteTags,
-            )..where((tbl) => tbl.noteId.equals(id))).go();
-            await (_db.delete(
-              _db.notes,
-            )..where((tbl) => tbl.id.equals(id))).go();
-          } else {
-            final hasPending = await _attachmentsRepo
-                .hasPendingAttachmentsForNote(id);
-            if (!hasPending) {
-              await (_db.update(_db.notes)..where((tbl) => tbl.id.equals(id)))
-                  .write(const NotesCompanion(isSynced: drift.Value(true)));
-            }
-          }
-        }
-      });
-
-      // 8. Save new sync timestamp
-      await _storage.write(key: _lastSyncKey, value: syncedAt);
-
-      // 9. Run any pending protocol migrations
-      await _runProtocolMigrations();
-    } catch (e) {
-      // Sync failed, will retry later (handled by sync loop)
-    }
+  Future<void> _writeArchived({
+    required List<String> ids,
+    required bool isArchived,
+  }) async {
+    await (_db.update(_db.notes)..where((tbl) => tbl.id.isIn(ids))).write(
+      NotesCompanion.custom(
+        isArchived: drift.Constant(isArchived),
+        updatedAt: drift.Variable(DateTime.now().toUtc()),
+        isSynced: const drift.Constant(false),
+        localRev: _nextRev,
+      ),
+    );
   }
+
+  Future<Note?> _noteRow(String id) => (_db.select(
+    _db.notes,
+  )..where((tbl) => tbl.id.equals(id))).getSingleOrNull();
 
   domain.Note _mapToDomain(Note row, List<String> tagIds) {
     return domain.Note(
@@ -703,26 +647,16 @@ class NotesRepository {
             )
           : null,
       isSynced: row.isSynced,
-    );
-  }
-
-  Note _mapToData(domain.Note note, {required bool isSynced}) {
-    return Note(
-      id: note.id,
-      title: note.title,
-      content: note.content,
-      isPinned: note.isPinned,
-      isArchived: note.isArchived,
-      background: note.background,
-      state: note.state.name,
-      updatedAt: note.updatedAt,
-      permission: note.permission.name,
-      shareIds: jsonEncode(note.shareIds ?? []),
-      sharedById: note.sharedBy?.id,
-      sharedByName: note.sharedBy?.name,
-      sharedByEmail: note.sharedBy?.email,
-      sharedByProfileImage: note.sharedBy?.profileImage,
-      isSynced: isSynced,
+      reminderSlot: row.reminderSlot,
+      reminder: row.reminderAt == null
+          ? null
+          : domain.NoteReminder(
+              remindAt: row.reminderAt!,
+              recurrence: domain.ReminderRecurrence.fromString(
+                row.reminderRecurrence,
+              ),
+              version: row.reminderVersion ?? 0,
+            ),
     );
   }
 }

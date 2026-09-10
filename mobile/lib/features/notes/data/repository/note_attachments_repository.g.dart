@@ -10,7 +10,7 @@ part of 'note_attachments_repository.dart';
 // ignore_for_file: type=lint, type=warning
 
 @ProviderFor(noteAttachmentsRepository)
-const noteAttachmentsRepositoryProvider = NoteAttachmentsRepositoryProvider._();
+final noteAttachmentsRepositoryProvider = NoteAttachmentsRepositoryProvider._();
 
 final class NoteAttachmentsRepositoryProvider
     extends
@@ -20,7 +20,7 @@ final class NoteAttachmentsRepositoryProvider
           NoteAttachmentsRepository
         >
     with $Provider<NoteAttachmentsRepository> {
-  const NoteAttachmentsRepositoryProvider._()
+  NoteAttachmentsRepositoryProvider._()
     : super(
         from: null,
         argument: null,
@@ -55,4 +55,4 @@ final class NoteAttachmentsRepositoryProvider
 }
 
 String _$noteAttachmentsRepositoryHash() =>
-    r'cc5fadc96e79ea721fe195f427b6559948413c5e';
+    r'3d26819b3df05e346f5638afc6801734a7174515';

@@ -13,6 +13,7 @@ import { NoteState } from 'src/generated/prisma/enums';
 import { UserStatus } from 'src/generated/prisma/enums';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
+import { BCRYPT_SALT_ROUNDS } from '../auth/constants/auth.constants';
 
 @Injectable()
 export class AdminService {
@@ -20,7 +21,7 @@ export class AdminService {
     private prisma: PrismaService,
     private settingsService: SettingsService,
     private oidcConfigService: OidcConfigService,
-  ) { }
+  ) {}
 
   async getStats() {
     const [totalUsers, totalNotes, totalTags] = await Promise.all([
@@ -30,7 +31,11 @@ export class AdminService {
           state: { not: NoteState.deleted },
         },
       }),
-      this.prisma.tag.count(),
+      this.prisma.tag.count({
+        where: {
+          isDeleted: false,
+        },
+      }),
     ]);
 
     return {
@@ -125,7 +130,10 @@ export class AdminService {
       throw new ConflictException('User already exists');
     }
 
-    const hashedPassword = await bcrypt.hash(createUserDto.password, 10);
+    const hashedPassword = await bcrypt.hash(
+      createUserDto.password,
+      BCRYPT_SALT_ROUNDS,
+    );
 
     const user = await this.prisma.user.create({
       data: {
@@ -147,7 +155,11 @@ export class AdminService {
     return user;
   }
 
-  async updateUser(id: string, updateUserDto: UpdateUserDto, currentUserId: string) {
+  async updateUser(
+    id: string,
+    updateUserDto: UpdateUserDto,
+    currentUserId: string,
+  ) {
     const user = await this.prisma.user.findUnique({
       where: { id },
     });
@@ -176,14 +188,17 @@ export class AdminService {
         where: { isAdmin: true },
       });
       if (adminCount === 1) {
-        throw new BadRequestException('Cannot remove admin status from the last admin user');
+        throw new BadRequestException(
+          'Cannot remove admin status from the last admin user',
+        );
       }
     }
 
     const data: Partial<UpdateUserDto> = {};
     if (updateUserDto.email !== undefined) data.email = updateUserDto.email;
     if (updateUserDto.name !== undefined) data.name = updateUserDto.name;
-    if (updateUserDto.isAdmin !== undefined) data.isAdmin = updateUserDto.isAdmin;
+    if (updateUserDto.isAdmin !== undefined)
+      data.isAdmin = updateUserDto.isAdmin;
 
     const updatedUser = await this.prisma.user.update({
       where: { id },
@@ -247,7 +262,7 @@ export class AdminService {
         .replace(/[+/=]/g, '')
         .slice(0, 16);
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
 
     await this.prisma.user.update({
       where: { id },

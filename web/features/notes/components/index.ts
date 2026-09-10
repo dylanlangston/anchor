@@ -1,20 +1,24 @@
-export { NoteCard } from "./note-card";
-export { QuillPreview } from "./quill-preview";
 export { NoteBackground, NoteBackgroundPicker } from "./backgrounds";
-export { RichTextEditor, QuillToolbar } from "./editor";
 export {
   ArchiveDialog,
-  RestoreDialog,
+  BulkArchiveDialog,
+  BulkDeleteDialog,
+  BulkTagDialog,
   DeleteDialog,
   PermanentDeleteDialog,
-  BulkDeleteDialog,
-  BulkArchiveDialog,
+  RestoreDialog,
 } from "./dialogs";
+export { QuillToolbar, RichTextEditor } from "./editor";
+export { NoteCard } from "./note-card";
+export { NoteContentDiff } from "./note-content-diff";
 export {
-  ReadOnlyBanner,
-  NoteEditorHeader,
   NoteEditorContent,
+  NoteEditorHeader,
+  ReadOnlyBanner,
 } from "./note-editor";
-export { ViewSettings } from "./view-settings";
+export { NoteHistorySheet } from "./note-history-sheet";
+export { QuillPreview } from "./quill-preview";
+export { ReminderPicker } from "./reminder-picker";
 export { ShareDialog } from "./share-dialog";
 export { SharedNoteIndicator } from "./shared-note-indicator";
+export { ViewSettings } from "./view-settings";

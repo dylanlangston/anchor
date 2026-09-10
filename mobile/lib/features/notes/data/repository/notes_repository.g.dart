@@ -10,13 +10,13 @@ part of 'notes_repository.dart';
 // ignore_for_file: type=lint, type=warning
 
 @ProviderFor(notesRepository)
-const notesRepositoryProvider = NotesRepositoryProvider._();
+final notesRepositoryProvider = NotesRepositoryProvider._();
 
 final class NotesRepositoryProvider
     extends
         $FunctionalProvider<NotesRepository, NotesRepository, NotesRepository>
     with $Provider<NotesRepository> {
-  const NotesRepositoryProvider._()
+  NotesRepositoryProvider._()
     : super(
         from: null,
         argument: null,
@@ -49,4 +49,4 @@ final class NotesRepositoryProvider
   }
 }
 
-String _$notesRepositoryHash() => r'c2db2f78b5f9c8b2edccb4821bd32cba6e69c82c';
+String _$notesRepositoryHash() => r'bd14aa0ce6b5589774313ea89a2e2e80c5aaf17b';

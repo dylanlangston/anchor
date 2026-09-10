@@ -1,10 +1,12 @@
 import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
-import 'package:flutter/foundation.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import '../logging/app_logger.dart';
+import '../logging/dio_logging_interceptor.dart';
 import 'server_config_provider.dart';
+import 'anchor_protocol.dart';
 
 part 'dio_provider.g.dart';
 
@@ -23,8 +25,8 @@ IOHttpClientAdapter createSelfSignedCertAdapter(String serverUrl) {
       final client = HttpClient();
       client.badCertificateCallback =
           (X509Certificate cert, String host, int port) {
-        return host == allowedHost;
-      };
+            return host == allowedHost;
+          };
       return client;
     },
   );
@@ -45,11 +47,11 @@ Dio dio(Ref ref) {
   dio.options.headers = {
     'Content-Type': 'application/json',
     'Accept': 'application/json',
+    anchorProtocolHeader: '$anchorProtocol',
   };
 
   // Allow self-signed certificates when the user has enabled the setting
-  final allowSelfSigned =
-      ref.watch(allowSelfSignedCertProvider).value ?? false;
+  final allowSelfSigned = ref.watch(allowSelfSignedCertProvider).value ?? false;
   if (allowSelfSigned && serverUrl != null && serverUrl.isNotEmpty) {
     dio.httpClientAdapter = createSelfSignedCertAdapter(serverUrl);
   }
@@ -96,9 +98,12 @@ Dio dio(Ref ref) {
                 'Content-Type': 'application/json',
                 'Accept': 'application/json',
               };
-              if (allowSelfSigned && serverUrl != null && serverUrl.isNotEmpty) {
-                refreshDio.httpClientAdapter =
-                    createSelfSignedCertAdapter(serverUrl);
+              if (allowSelfSigned &&
+                  serverUrl != null &&
+                  serverUrl.isNotEmpty) {
+                refreshDio.httpClientAdapter = createSelfSignedCertAdapter(
+                  serverUrl,
+                );
               }
 
               // Call refresh endpoint
@@ -133,8 +138,14 @@ Dio dio(Ref ref) {
               );
 
               return handler.resolve(retryResponse);
-            } catch (refreshError) {
+            } catch (refreshError, stack) {
               _isRefreshing = false;
+              AppLogger.instance.error(
+                'Auth',
+                'Token refresh failed',
+                error: refreshError,
+                stackTrace: stack,
+              );
               return handler.reject(e);
             }
           } else {
@@ -176,10 +187,9 @@ Dio dio(Ref ref) {
     ),
   );
 
-  // Add logging interceptor in debug mode
-  if (kDebugMode) {
-    dio.interceptors.add(LogInterceptor(requestBody: true, responseBody: true));
-  }
+  // Always log requests/responses (with redaction) so users can collect
+  // diagnostics without a hidden toggle.
+  dio.interceptors.add(AppLoggingInterceptor());
 
   return dio;
 }
@@ -206,6 +216,7 @@ DioException _transformError(DioException e) {
       message = 'Request timeout. Please try again.';
       break;
     case DioExceptionType.receiveTimeout:
+    case DioExceptionType.transformTimeout:
       message = 'Response timeout. Please try again.';
       break;
     case DioExceptionType.connectionError:
@@ -230,6 +241,9 @@ DioException _transformError(DioException e) {
           break;
         case 404:
           message = 'Resource not found.';
+          break;
+        case upgradeRequiredStatus:
+          message = 'App and server versions are incompatible.';
           break;
         case 500:
           message = 'Server error. Please try again later.';

@@ -1,8 +1,7 @@
-import 'package:flutter/foundation.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
+import 'package:anchor/core/network/sync_requester.dart';
 import 'package:anchor/features/notes/domain/note.dart';
 import '../data/repository/notes_repository.dart';
-import '../../tags/data/repository/tags_repository.dart';
 import '../../tags/presentation/tags_controller.dart';
 
 part 'notes_controller.g.dart';
@@ -22,28 +21,12 @@ class SyncingState extends _$SyncingState {
 class NotesController extends _$NotesController {
   @override
   Stream<List<Note>> build() {
-    // Trigger sync on first build
-    Future.microtask(() => sync());
-
-    // Watch for tag filter changes
     final selectedTagId = ref.watch(selectedTagFilterProvider);
-
     return ref.watch(notesRepositoryProvider).watchNotes(tagId: selectedTagId);
   }
 
   Future<void> sync() async {
-    final syncingNotifier = ref.read(syncingStateProvider.notifier);
-    syncingNotifier.setSyncing(true);
-    try {
-      // Sync tags FIRST to ensure tag IDs are resolved
-      await ref.read(tagsRepositoryProvider).sync();
-      // Then sync notes
-      await ref.read(notesRepositoryProvider).sync();
-    } catch (e) {
-      debugPrint('Sync error: $e');
-    } finally {
-      syncingNotifier.setSyncing(false);
-    }
+    await requestAppSync(trigger: 'NotesController.sync');
   }
 
   Future<void> deleteNote(String id) async {
@@ -56,6 +39,14 @@ class NotesController extends _$NotesController {
 
   Future<int> bulkArchiveNotes(List<String> ids) async {
     return await ref.read(notesRepositoryProvider).bulkArchiveNotes(ids);
+  }
+
+  Future<int> bulkSetPinned(List<String> ids, bool isPinned) async {
+    return await ref.read(notesRepositoryProvider).bulkSetPinned(ids, isPinned);
+  }
+
+  Future<int> bulkAddTags(List<String> ids, List<String> tagIds) async {
+    return await ref.read(notesRepositoryProvider).bulkAddTags(ids, tagIds);
   }
 }
 

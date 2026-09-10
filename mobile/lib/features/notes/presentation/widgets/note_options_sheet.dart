@@ -1,15 +1,26 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
-import 'package:lucide_icons/lucide_icons.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+import '../../../../core/theme/context_extensions.dart';
+import '../../../../core/theme/tokens/app_icon_sizes.dart';
+import '../../../../core/theme/tokens/app_opacity.dart';
+import '../../../../core/widgets/app_bottom_sheet.dart';
 
 class NoteOptionsSheet extends StatelessWidget {
   final bool isReadOnly;
   final bool isNew;
   final bool isOwner;
   final bool isArchived;
+  final VoidCallback onTagsTap;
+  final VoidCallback onReminderTap;
   final VoidCallback onBackgroundTap;
   final VoidCallback onAttachmentTap;
   final VoidCallback onArchiveTap;
   final VoidCallback onDeleteTap;
+
+  /// Null hides the option, for notes that have no history to read.
+  final VoidCallback? onHistoryTap;
 
   const NoteOptionsSheet({
     super.key,
@@ -17,226 +28,214 @@ class NoteOptionsSheet extends StatelessWidget {
     required this.isNew,
     required this.isOwner,
     required this.isArchived,
+    required this.onTagsTap,
+    required this.onReminderTap,
     required this.onBackgroundTap,
     required this.onAttachmentTap,
     required this.onArchiveTap,
     required this.onDeleteTap,
+    this.onHistoryTap,
   });
+
+  static const double _maxTileWidth = 104;
+
+  /// Scaled by the user's text scale so long labels keep their two lines.
+  static const double _minTileWidth = 76;
+
+  static const int _minColumns = 2;
+  static const int _maxColumns = 5;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
+    final dims = context.dims;
 
-    return Container(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: isDark
-              ? [const Color(0xFF262A36), const Color(0xFF1C1E26)]
-              : [Colors.white, const Color(0xFFF8F9FC)],
+    final canManage = !isReadOnly && isOwner && !isNew;
+    final options = <_OptionSpec>[
+      if (!isReadOnly)
+        _OptionSpec(icon: LucideIcons.tags, label: 'Tags', onTap: onTagsTap),
+      if (!isReadOnly)
+        _OptionSpec(
+          icon: LucideIcons.bell,
+          label: 'Reminder',
+          onTap: onReminderTap,
         ),
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.15),
-            blurRadius: 20,
-            offset: const Offset(0, -5),
-          ),
-        ],
-      ),
-      child: SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Handle bar
-            Container(
-              margin: const EdgeInsets.only(top: 12),
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(
-                color: theme.colorScheme.onSurface.withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
+      if (!isReadOnly)
+        _OptionSpec(
+          icon: LucideIcons.palette,
+          label: 'Background',
+          onTap: onBackgroundTap,
+        ),
+      if (!isReadOnly)
+        _OptionSpec(
+          icon: LucideIcons.paperclip,
+          label: 'Attachment',
+          onTap: onAttachmentTap,
+        ),
+      if (onHistoryTap != null)
+        _OptionSpec(
+          icon: LucideIcons.history,
+          label: 'History',
+          onTap: onHistoryTap!,
+        ),
+      if (canManage) ...[
+        _OptionSpec(
+          icon: isArchived ? LucideIcons.archiveRestore : LucideIcons.archive,
+          label: isArchived ? 'Unarchive' : 'Archive',
+          onTap: onArchiveTap,
+        ),
+        _OptionSpec(
+          icon: LucideIcons.trash2,
+          label: 'Delete',
+          onTap: onDeleteTap,
+          isDestructive: true,
+        ),
+      ],
+    ];
 
-            // Header
-            Padding(
-              padding: const EdgeInsets.fromLTRB(24, 20, 16, 24),
-              child: Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.primary.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Icon(
-                      LucideIcons.moreHorizontal,
-                      color: theme.colorScheme.primary,
-                      size: 20,
+    return AppBottomSheet(
+      icon: LucideIcons.moreHorizontal,
+      title: 'More Options',
+      subtitle: 'Customize and manage your note',
+      child: SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(dims.xl, 0, dims.xl, dims.xl),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final spacing = dims.sm;
+            final minTile = MediaQuery.textScalerOf(
+              context,
+            ).scale(_minTileWidth);
+            final columns = _columnsFor(
+              count: options.length,
+              width: constraints.maxWidth,
+              minTileWidth: minTile,
+              spacing: spacing,
+            );
+            final tileWidth = math.min(
+              (constraints.maxWidth - spacing * (columns - 1)) / columns,
+              _maxTileWidth,
+            );
+
+            return Wrap(
+              spacing: spacing,
+              runSpacing: dims.lg,
+              children: [
+                for (final option in options)
+                  SizedBox(
+                    width: tileWidth,
+                    child: _GridOptionTile(
+                      option: option,
+                      color: option.isDestructive
+                          ? theme.colorScheme.error
+                          : null,
                     ),
                   ),
-                  const SizedBox(width: 14),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'More Options',
-                          style: theme.textTheme.titleLarge?.copyWith(
-                            fontSize: 20,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        Text(
-                          'Customize and manage your note',
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: theme.colorScheme.onSurface.withValues(
-                              alpha: 0.6,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-
-            // Options Grid
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: SizedBox(
-                width: double.infinity,
-                child: Wrap(
-                  spacing: 20,
-                  runSpacing: 24,
-                  alignment: WrapAlignment.start,
-                  children: [
-                    if (!isReadOnly)
-                      _GridOptionTile(
-                        icon: LucideIcons.palette,
-                        title: 'Background',
-                        onTap: () {
-                          Navigator.pop(context);
-                          onBackgroundTap();
-                        },
-                      ),
-
-                    if (!isReadOnly && !isNew)
-                      _GridOptionTile(
-                        icon: LucideIcons.paperclip,
-                        title: 'Attachment',
-                        onTap: () {
-                          Navigator.pop(context);
-                          onAttachmentTap();
-                        },
-                      ),
-
-                    if (!isReadOnly && isOwner && !isNew) ...[
-                      _GridOptionTile(
-                        icon: isArchived
-                            ? LucideIcons.archiveRestore
-                            : LucideIcons.archive,
-                        title: isArchived ? 'Unarchive' : 'Archive',
-                        onTap: () {
-                          Navigator.pop(context);
-                          onArchiveTap();
-                        },
-                      ),
-                      _GridOptionTile(
-                        icon: LucideIcons.trash2,
-                        title: 'Delete',
-                        iconColor: theme.colorScheme.error,
-                        textColor: theme.colorScheme.error,
-                        backgroundColor: theme.colorScheme.error.withValues(
-                          alpha: 0.1,
-                        ),
-                        onTap: () {
-                          Navigator.pop(context);
-                          onDeleteTap();
-                        },
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 32),
-          ],
+              ],
+            );
+          },
         ),
       ),
     );
   }
+
+  static int _columnsFor({
+    required int count,
+    required double width,
+    required double minTileWidth,
+    required double spacing,
+  }) {
+    final fitting = ((width + spacing) / (minTileWidth + spacing))
+        .floor()
+        .clamp(_minColumns, _maxColumns);
+    return math.max(math.min(count, fitting), 1);
+  }
+}
+
+class _OptionSpec {
+  const _OptionSpec({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.isDestructive = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final bool isDestructive;
 }
 
 class _GridOptionTile extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final VoidCallback onTap;
-  final Color? iconColor;
-  final Color? textColor;
-  final Color? backgroundColor;
+  const _GridOptionTile({required this.option, this.color});
 
-  const _GridOptionTile({
-    required this.icon,
-    required this.title,
-    required this.onTap,
-    this.iconColor,
-    this.textColor,
-    this.backgroundColor,
-  });
+  final _OptionSpec option;
+
+  /// Accent for a highlighted action; defaults to the neutral icon colour.
+  final Color? color;
+
+  static const double _minCircle = 52;
+  static const double _maxCircle = 64;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final effectiveIconColor = iconColor ?? theme.colorScheme.onSurfaceVariant;
-    final effectiveTextColor = textColor ?? theme.colorScheme.onSurface;
-    final effectiveBgColor = backgroundColor ?? theme.colorScheme.surface;
+    final accent = color ?? theme.colorScheme.onSurfaceVariant;
+    final labelColor = color ?? theme.colorScheme.onSurface;
+    final background = color == null
+        ? theme.colorScheme.surfaceContainerHigh
+        : color!.withValues(alpha: AppOpacity.subtleFill);
 
-    return SizedBox(
-      width: 72,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Material(
-            color: effectiveBgColor,
-            shape: CircleBorder(
-              side: BorderSide(
-                color: effectiveIconColor.withValues(alpha: 0.15),
-                width: 1,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final circle = constraints.maxWidth.clamp(_minCircle, _maxCircle);
+
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Material(
+              color: background,
+              shape: CircleBorder(
+                side: BorderSide(
+                  color: accent.withValues(alpha: AppOpacity.hairline),
+                  width: 1,
+                ),
               ),
-            ),
-            clipBehavior: Clip.antiAlias,
-            child: InkWell(
-              onTap: onTap,
-              highlightColor: effectiveIconColor.withValues(alpha: 0.1),
-              splashColor: effectiveIconColor.withValues(alpha: 0.1),
-              child: SizedBox(
-                width: 60,
-                height: 60,
-                child: Center(
-                  child: Icon(icon, size: 24, color: effectiveIconColor),
+              clipBehavior: Clip.antiAlias,
+              child: InkWell(
+                onTap: () {
+                  Navigator.pop(context);
+                  option.onTap();
+                },
+                highlightColor: accent.withValues(alpha: AppOpacity.activeFill),
+                splashColor: accent.withValues(alpha: AppOpacity.activeFill),
+                child: SizedBox(
+                  width: circle,
+                  height: circle,
+                  child: Center(
+                    child: Icon(
+                      option.icon,
+                      size: AppIconSizes.lg,
+                      color: accent,
+                    ),
+                  ),
                 ),
               ),
             ),
-          ),
-          const SizedBox(height: 10),
-          Text(
-            title,
-            textAlign: TextAlign.center,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.labelMedium?.copyWith(
-              color: effectiveTextColor,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.2,
+            SizedBox(height: context.dims.xs),
+            Text(
+              option.label,
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.labelMedium?.copyWith(
+                color: labelColor,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.2,
+              ),
             ),
-          ),
-        ],
-      ),
+          ],
+        );
+      },
     );
   }
 }

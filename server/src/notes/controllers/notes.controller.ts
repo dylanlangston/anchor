@@ -12,15 +12,16 @@ import {
 import { NotesService } from '../services/notes.service';
 import { CreateNoteDto } from '../dto/create-note.dto';
 import { UpdateNoteDto } from '../dto/update-note.dto';
-import { SyncNotesDto } from '../dto/sync-notes.dto';
 import { BulkActionDto } from '../dto/bulk-action.dto';
+import { BulkPinDto } from '../dto/bulk-pin.dto';
+import { BulkTagsDto } from '../dto/bulk-tags.dto';
 import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import { AuthGuard } from '../../auth/auth.guard';
 
 @Controller('api/notes')
 @UseGuards(AuthGuard)
 export class NotesController {
-  constructor(private readonly notesService: NotesService) { }
+  constructor(private readonly notesService: NotesService) {}
 
   @Post()
   create(
@@ -28,11 +29,6 @@ export class NotesController {
     @Body() createNoteDto: CreateNoteDto,
   ) {
     return this.notesService.create(userId, createNoteDto);
-  }
-
-  @Post('sync')
-  sync(@CurrentUser('id') userId: string, @Body() syncDto: SyncNotesDto) {
-    return this.notesService.sync(userId, syncDto);
   }
 
   @Get()
@@ -98,6 +94,27 @@ export class NotesController {
     @Body() bulkActionDto: BulkActionDto,
   ) {
     return this.notesService.bulkArchive(userId, bulkActionDto.noteIds);
+  }
+
+  @Post('bulk/pin')
+  bulkPin(@CurrentUser('id') userId: string, @Body() bulkPinDto: BulkPinDto) {
+    return this.notesService.bulkSetPin(
+      userId,
+      bulkPinDto.noteIds,
+      bulkPinDto.isPinned,
+    );
+  }
+
+  @Post('bulk/tags')
+  bulkAddTags(
+    @CurrentUser('id') userId: string,
+    @Body() bulkTagsDto: BulkTagsDto,
+  ) {
+    return this.notesService.bulkAddTags(
+      userId,
+      bulkTagsDto.noteIds,
+      bulkTagsDto.tagIds,
+    );
   }
 }
 

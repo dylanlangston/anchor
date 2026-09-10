@@ -7,12 +7,21 @@ class ServerInfo {
   final String version;
   final String app;
 
-  ServerInfo({required this.version, required this.app});
+  /// advertise them.
+  final List<int> protocols;
+
+  ServerInfo({
+    required this.version,
+    required this.app,
+    this.protocols = const [],
+  });
 
   factory ServerInfo.fromJson(Map<String, dynamic> json) {
     return ServerInfo(
       version: json['version'] as String? ?? 'Unknown',
       app: json['app'] as String? ?? 'Unknown',
+      protocols:
+          (json['protocols'] as List?)?.whereType<int>().toList() ?? const [],
     );
   }
 }
@@ -22,7 +31,7 @@ Future<ServerInfo?> serverInfo(Ref ref) async {
   try {
     final dio = ref.watch(dioProvider);
     final response = await dio.get('/api/health');
-    
+
     if (response.statusCode == 200) {
       return ServerInfo.fromJson(response.data);
     }

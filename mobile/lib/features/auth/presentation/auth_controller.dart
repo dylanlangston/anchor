@@ -1,7 +1,9 @@
 import 'package:riverpod_annotation/riverpod_annotation.dart';
+
+import '../../../core/network/server_config_provider.dart';
 import '../../../core/providers/active_user_id_provider.dart';
-import '../domain/user.dart';
 import '../data/repository/auth_repository.dart';
+import '../domain/user.dart';
 
 part 'auth_controller.g.dart';
 
@@ -9,29 +11,51 @@ part 'auth_controller.g.dart';
 class AuthController extends _$AuthController {
   @override
   Future<User?> build() async {
+    final serverUrl = await ref.watch(serverConfigProvider.future);
+    await ref.watch(allowSelfSignedCertProvider.future);
+
     final authRepo = ref.watch(authRepositoryProvider);
 
-    // Check if we have a token
     final token = await authRepo.getToken();
     if (token == null) {
-      // No token means user is not logged in
       return null;
     }
 
-    // Try to fetch fresh data from server first
+    if (serverUrl == null || serverUrl.isEmpty) {
+      return null;
+    }
+
+    // Offline-first: trust the cached profile so startup never waits on the
+    // network, then refresh it in the background.
+    final cachedUser = await authRepo.getCurrentUser();
+    if (cachedUser != null) {
+      ref.read(activeUserIdProvider.notifier).set(cachedUser.id);
+      _refreshProfileInBackground(authRepo);
+      return cachedUser;
+    }
+
+    // No cached profile (e.g. corrupt cache); fall back to the server.
     try {
       final freshUser = await authRepo.getProfile();
-      // Ensure activeUserId is set (covers app restart scenario)
       ref.read(activeUserIdProvider.notifier).set(freshUser.id);
       return freshUser;
     } catch (e) {
-      // If fetch fails (network error, etc.), fall back to cached data
-      final cachedUser = await authRepo.getCurrentUser();
-      if (cachedUser != null) {
-        ref.read(activeUserIdProvider.notifier).set(cachedUser.id);
-      }
-      return cachedUser;
+      return null;
     }
+  }
+
+  void _refreshProfileInBackground(AuthRepository authRepo) {
+    Future(() async {
+      try {
+        final freshUser = await authRepo.getProfile();
+        if (!ref.mounted) return;
+        if (state.value?.id == freshUser.id) {
+          state = AsyncData(freshUser);
+        }
+      } catch (_) {
+        // Server unreachable; keep the cached profile.
+      }
+    });
   }
 
   Future<void> login(String email, String password) async {

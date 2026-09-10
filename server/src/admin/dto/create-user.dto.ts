@@ -6,7 +6,9 @@ import {
   MinLength,
 } from 'class-validator';
 import { Transform } from 'class-transformer';
+import { RejectUnknownFields } from '../../common/decorators/reject-unknown-fields.decorator';
 
+@RejectUnknownFields()
 export class CreateUserDto {
   @IsEmail()
   email: string;
@@ -17,7 +19,7 @@ export class CreateUserDto {
 
   @IsNotEmpty()
   @IsString()
-  @Transform(({ value }) => value?.trim())
+  @Transform(({ value }: { value: string }) => value?.trim())
   @MaxLength(100)
   name: string;
 }

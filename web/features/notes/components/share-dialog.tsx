@@ -1,8 +1,18 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Search, UserPlus, X, Loader2, Edit, Eye, ChevronDown } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  ChevronDown,
+  Edit,
+  Eye,
+  Loader2,
+  Search,
+  UserPlus,
+  X,
+} from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -12,25 +22,24 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
-import { Separator } from "@/components/ui/separator";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Separator } from "@/components/ui/separator";
+import { cn } from "@/lib/utils";
 import {
-  shareNote,
   getNoteShares,
-  updateNoteSharePermission,
+  getRecentContacts,
   revokeShare,
   searchUsers,
+  shareNote,
+  updateNoteSharePermission,
 } from "../api";
 import type { NoteSharePermission, UserSearchResult } from "../types";
-import { toast } from "sonner";
-import { cn } from "@/lib/utils";
 
 interface ShareDialogProps {
   open: boolean;
@@ -52,6 +61,13 @@ export function ShareDialog({ open, onOpenChange, noteId }: ShareDialogProps) {
     queryKey: ["note-shares", noteId],
     queryFn: () => getNoteShares(noteId),
     enabled: open && !!noteId,
+  });
+
+  // Fetch recently shared-with contacts (shown when search box is empty)
+  const { data: recentContacts = [] } = useQuery({
+    queryKey: ["recent-contacts"],
+    queryFn: getRecentContacts,
+    enabled: open,
   });
 
   // Search users with debounce
@@ -139,7 +155,10 @@ export function ShareDialog({ open, onOpenChange, noteId }: ShareDialogProps) {
     });
   };
 
-  const handleUpdatePermission = (shareId: string, permission: NoteSharePermission) => {
+  const handleUpdatePermission = (
+    shareId: string,
+    permission: NoteSharePermission,
+  ) => {
     updatePermissionMutation.mutate({ shareId, permission });
   };
 
@@ -147,11 +166,21 @@ export function ShareDialog({ open, onOpenChange, noteId }: ShareDialogProps) {
     revokeMutation.mutate(shareId);
   };
 
-  // Filter out already shared users from search results
-  const availableUsers = useMemo(() => {
-    const sharedUserIds = new Set(shares.map((s) => s.sharedWithUser.id));
-    return searchResults.filter((user) => !sharedUserIds.has(user.id));
-  }, [searchResults, shares]);
+  // Filter out already shared users from search results and recent contacts
+  const sharedUserIds = useMemo(
+    () => new Set(shares.map((s) => s.sharedWithUser.id)),
+    [shares],
+  );
+  const availableUsers = useMemo(
+    () => searchResults.filter((user) => !sharedUserIds.has(user.id)),
+    [searchResults, sharedUserIds],
+  );
+  const availableRecentContacts = useMemo(
+    () => recentContacts.filter((user) => !sharedUserIds.has(user.id)),
+    [recentContacts, sharedUserIds],
+  );
+
+  const isSearchActive = searchQuery.trim().length >= 2;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -164,7 +193,8 @@ export function ShareDialog({ open, onOpenChange, noteId }: ShareDialogProps) {
             Share Note
           </DialogTitle>
           <DialogDescription className="pt-2">
-            Share this note with other users. Viewers can read, editors can edit.
+            Share this note with other users. Viewers can read, editors can
+            edit.
           </DialogDescription>
         </DialogHeader>
 
@@ -174,7 +204,7 @@ export function ShareDialog({ open, onOpenChange, noteId }: ShareDialogProps) {
             <div className="relative">
               <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
-                placeholder="Enter email address..."
+                placeholder="Search by name or email..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="pl-9"
@@ -185,33 +215,35 @@ export function ShareDialog({ open, onOpenChange, noteId }: ShareDialogProps) {
             </div>
 
             {/* Search Results */}
-            {availableUsers.length > 0 && (
+            {isSearchActive && availableUsers.length > 0 && (
               <div className="border rounded-md max-h-48 overflow-y-auto divide-y">
                 {availableUsers.map((user) => (
-                  <button
+                  <UserResultRow
                     key={user.id}
-                    onClick={() => setSelectedUserId(user.id)}
-                    className={cn(
-                      "w-full px-3 py-2.5 text-left hover:bg-muted transition-colors flex items-center gap-3",
-                      selectedUserId === user.id && "bg-muted"
-                    )}
-                  >
-                    <Avatar className="size-8">
-                      {user.profileImage && (
-                        <AvatarImage src={user.profileImage} alt={user.name} />
-                      )}
-                      <AvatarFallback className="bg-primary/10 text-primary font-medium text-sm">
-                        {user.name.charAt(0).toUpperCase()}
-                      </AvatarFallback>
-                    </Avatar>
-                    <div className="flex-1 min-w-0 text-left">
-                      <div className="font-medium truncate">{user.name}</div>
-                      <div className="text-sm text-muted-foreground truncate">
-                        {user.email}
-                      </div>
-                    </div>
-                  </button>
+                    user={user}
+                    selected={selectedUserId === user.id}
+                    onSelect={() => setSelectedUserId(user.id)}
+                  />
                 ))}
+              </div>
+            )}
+
+            {/* Recently shared with (shown when search box is empty) */}
+            {!isSearchActive && availableRecentContacts.length > 0 && (
+              <div className="space-y-1.5">
+                <div className="text-xs font-medium text-muted-foreground px-1">
+                  Recently shared with
+                </div>
+                <div className="border rounded-md max-h-48 overflow-y-auto divide-y">
+                  {availableRecentContacts.map((user) => (
+                    <UserResultRow
+                      key={user.id}
+                      user={user}
+                      selected={selectedUserId === user.id}
+                      onSelect={() => setSelectedUserId(user.id)}
+                    />
+                  ))}
+                </div>
               </div>
             )}
 
@@ -219,8 +251,14 @@ export function ShareDialog({ open, onOpenChange, noteId }: ShareDialogProps) {
             {selectedUserId && (
               <div className="flex items-center gap-2">
                 <DropdownMenu>
-                  <DropdownMenuTrigger asChild className="hover:bg-primary/10 hover:text-primary">
-                    <Button variant="outline" className="flex-1 justify-between">
+                  <DropdownMenuTrigger
+                    asChild
+                    className="hover:bg-primary/10 hover:text-primary"
+                  >
+                    <Button
+                      variant="outline"
+                      className="flex-1 justify-between"
+                    >
                       <div className="flex items-center gap-2">
                         {selectedPermission === "viewer" ? (
                           <>
@@ -289,7 +327,7 @@ export function ShareDialog({ open, onOpenChange, noteId }: ShareDialogProps) {
               </div>
             ) : shares.length === 0 ? (
               <div className="text-sm text-muted-foreground py-8 text-center border border-dashed rounded-md">
-                No shares yet. Enter an email address to share this note.
+                No shares yet. Search by name or email to share this note.
               </div>
             ) : (
               <div className="border rounded-md divide-y">
@@ -321,7 +359,10 @@ export function ShareDialog({ open, onOpenChange, noteId }: ShareDialogProps) {
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       <DropdownMenu>
-                        <DropdownMenuTrigger asChild className="hover:bg-primary/10 hover:text-primary">
+                        <DropdownMenuTrigger
+                          asChild
+                          className="hover:bg-primary/10 hover:text-primary"
+                        >
                           <Button
                             variant="outline"
                             size="sm"
@@ -403,5 +444,39 @@ export function ShareDialog({ open, onOpenChange, noteId }: ShareDialogProps) {
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+interface UserResultRowProps {
+  user: UserSearchResult;
+  selected: boolean;
+  onSelect: () => void;
+}
+
+function UserResultRow({ user, selected, onSelect }: UserResultRowProps) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={cn(
+        "w-full px-3 py-2.5 text-left hover:bg-muted transition-colors flex items-center gap-3",
+        selected && "bg-muted",
+      )}
+    >
+      <Avatar className="size-8">
+        {user.profileImage && (
+          <AvatarImage src={user.profileImage} alt={user.name} />
+        )}
+        <AvatarFallback className="bg-primary/10 text-primary font-medium text-sm">
+          {user.name.charAt(0).toUpperCase()}
+        </AvatarFallback>
+      </Avatar>
+      <div className="flex-1 min-w-0 text-left">
+        <div className="font-medium truncate">{user.name}</div>
+        <div className="text-sm text-muted-foreground truncate">
+          {user.email}
+        </div>
+      </div>
+    </button>
   );
 }

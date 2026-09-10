@@ -10,12 +10,12 @@ part of 'tags_repository.dart';
 // ignore_for_file: type=lint, type=warning
 
 @ProviderFor(tagsRepository)
-const tagsRepositoryProvider = TagsRepositoryProvider._();
+final tagsRepositoryProvider = TagsRepositoryProvider._();
 
 final class TagsRepositoryProvider
     extends $FunctionalProvider<TagsRepository, TagsRepository, TagsRepository>
     with $Provider<TagsRepository> {
-  const TagsRepositoryProvider._()
+  TagsRepositoryProvider._()
     : super(
         from: null,
         argument: null,
@@ -48,4 +48,4 @@ final class TagsRepositoryProvider
   }
 }
 
-String _$tagsRepositoryHash() => r'f6fde887bfe145d3a24317bc929f2ee38206e13f';
+String _$tagsRepositoryHash() => r'280a53b280d28a3daaf6c507f67ef092a6273ea6';

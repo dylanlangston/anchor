@@ -1,14 +1,16 @@
 import 'dart:io';
+
 import 'package:dio/dio.dart';
 import 'package:drift/drift.dart' as drift;
-import 'package:flutter/foundation.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
+import 'package:path_provider/path_provider.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:uuid/uuid.dart';
+
 import '../../../../core/database/app_database.dart';
-import '../../../../core/network/connectivity_provider.dart';
+import '../../../../core/logging/app_logger.dart';
 import '../../../../core/network/dio_provider.dart';
+import '../../../../core/network/sync_requester.dart';
 import '../../domain/note_attachment.dart' as domain;
 
 part 'note_attachments_repository.g.dart';
@@ -18,23 +20,18 @@ NoteAttachmentsRepository noteAttachmentsRepository(Ref ref) {
   final db = ref.watch(appDatabaseProvider);
   final dio = ref.watch(dioProvider);
 
-  void triggerSync() {
-    ref.read(syncManagerProvider.notifier).manualSync();
-  }
-
-  return NoteAttachmentsRepository(db, dio, triggerSync);
+  return NoteAttachmentsRepository(db, dio);
 }
 
 class NoteAttachmentsRepository {
   final AppDatabase _db;
   final Dio _dio;
-  final void Function() _triggerSync;
 
   /// In-flight downloads keyed by attachmentId to deduplicate concurrent
   /// requests for the same file.
   final Map<String, Future<String>> _activeDownloads = {};
 
-  NoteAttachmentsRepository(this._db, this._dio, this._triggerSync);
+  NoteAttachmentsRepository(this._db, this._dio);
 
   /// Watch attachments for a note reactively (excludes pending-delete)
   Stream<List<domain.NoteAttachment>> watchAttachments(String noteId) {
@@ -51,54 +48,35 @@ class NoteAttachmentsRepository {
         .map((rows) => rows.map(_mapToDomain).toList());
   }
 
-  /// Fetch attachments for a batch of notes from the server and update local DB.
-  Future<void> fetchAttachmentsForNotes(List<String> noteIds) async {
-    for (final noteId in noteIds) {
-      try {
-        await fetchAttachments(noteId);
-      } catch (e) {
-        debugPrint('Failed to fetch attachments for $noteId: $e');
-      }
-    }
-  }
-
-  /// Fetch attachments from server and update local DB
-  Future<List<domain.NoteAttachment>> fetchAttachments(String noteId) async {
-    final response = await _dio.get('/api/notes/$noteId/attachments');
-    final items = (response.data as List)
-        .map((e) => domain.NoteAttachment.fromJson(e as Map<String, dynamic>))
-        .toList();
-
-    // Find orphaned files (attachments that are no longer in the server list)
+  /// Replaces a note's attachment list with the server's, leaving anything
+  /// pending alone. Returns cached files the caller should delete once saved.
+  Future<List<String>> applyServerAttachments(
+    String noteId,
+    List<domain.NoteAttachment> items,
+  ) async {
     final orphanedPaths = <String>[];
 
     await _db.transaction(() async {
-      // Remove attachments not in server list
       final serverIds = items.map((a) => a.id).toSet();
       final localRows = await (_db.select(
         _db.noteAttachments,
       )..where((tbl) => tbl.noteId.equals(noteId))).get();
 
       for (final row in localRows) {
-        if (row.syncStatus ==
-            domain.AttachmentSyncStatus.pendingUpload.dbValue) {
+        if (row.syncStatus != domain.AttachmentSyncStatus.synced.dbValue) {
           continue;
         }
-        if (row.syncStatus ==
-            domain.AttachmentSyncStatus.pendingDelete.dbValue) {
+        if (serverIds.contains(row.serverAttachmentId ?? row.id)) {
           continue;
         }
-        if (!serverIds.contains(row.serverAttachmentId ?? row.id)) {
-          if (row.localPath != null) {
-            orphanedPaths.add(row.localPath!);
-          }
-          await (_db.delete(
-            _db.noteAttachments,
-          )..where((tbl) => tbl.id.equals(row.id))).go();
+        if (row.localPath != null) {
+          orphanedPaths.add(row.localPath!);
         }
+        await (_db.delete(
+          _db.noteAttachments,
+        )..where((tbl) => tbl.id.equals(row.id))).go();
       }
 
-      // Upsert server attachments
       for (final attachment in items) {
         final existing =
             await (_db.select(_db.noteAttachments)
@@ -115,7 +93,7 @@ class NoteAttachmentsRepository {
             .insertOnConflictUpdate(
               NoteAttachmentsCompanion.insert(
                 id: attachment.id,
-                noteId: attachment.noteId,
+                noteId: noteId,
                 type: attachment.type.name,
                 originalFilename: attachment.originalFilename,
                 mimeType: attachment.mimeType,
@@ -132,30 +110,23 @@ class NoteAttachmentsRepository {
       }
     });
 
-    // Delete orphaned files after the transaction has committed
-    for (final p in orphanedPaths) {
-      try {
-        await File(p).delete();
-      } catch (e) {
-        debugPrint('Failed to delete orphaned file $p: $e');
-      }
-    }
-
-    return items;
+    return orphanedPaths;
   }
 
-  /// Returns true if the note has any attachments with unsynced status
-  Future<bool> hasPendingAttachmentsForNote(String noteId) async {
-    final rows =
-        await (_db.select(_db.noteAttachments)..where(
-              (tbl) =>
-                  tbl.noteId.equals(noteId) &
-                  tbl.syncStatus
-                      .equals(domain.AttachmentSyncStatus.synced.dbValue)
-                      .not(),
-            ))
-            .get();
-    return rows.isNotEmpty;
+  /// Deletes cached files by path, ignoring the ones already gone.
+  Future<void> deleteFiles(Iterable<String> paths) async {
+    for (final filePath in paths) {
+      try {
+        await File(filePath).delete();
+      } catch (e, stack) {
+        AppLogger.instance.error(
+          'Attachments',
+          'Failed to delete orphaned file $filePath',
+          error: e,
+          stackTrace: stack,
+        );
+      }
+    }
   }
 
   /// Download attachment file and cache locally.
@@ -184,6 +155,26 @@ class NoteAttachmentsRepository {
     // Clean up zero-byte remnant from a previous interrupted download
     if (file.existsSync()) {
       file.deleteSync();
+    }
+
+    // If the local row was deleted (stale UI snapshot), the server won't have
+    // it either — short-circuit instead of burning a guaranteed 404.
+    final existsLocally =
+        await (_db.selectOnly(_db.noteAttachments)
+              ..addColumns([_db.noteAttachments.id])
+              ..where(
+                _db.noteAttachments.id.equals(attachmentId) |
+                    _db.noteAttachments.serverAttachmentId.equals(attachmentId),
+              )
+              ..limit(1))
+            .getSingleOrNull();
+    if (existsLocally == null) {
+      AppLogger.instance.debug(
+        'Attachments',
+        'Skip download for $attachmentId (noteId=$noteId): not in local DB '
+            '— stale UI snapshot, attachment was likely deleted',
+      );
+      throw StateError('Attachment $attachmentId no longer exists locally');
     }
 
     // Deduplicate
@@ -262,8 +253,13 @@ class NoteAttachmentsRepository {
       if (row.localPath != null) {
         try {
           await File(row.localPath!).delete();
-        } catch (e) {
-          debugPrint('Failed to delete local file ${row.localPath}: $e');
+        } catch (e, stack) {
+          AppLogger.instance.error(
+            'Attachments',
+            'Failed to delete local file ${row.localPath}',
+            error: e,
+            stackTrace: stack,
+          );
         }
       }
       await (_db.delete(
@@ -281,8 +277,14 @@ class NoteAttachmentsRepository {
       );
     }
 
-    await _markNoteUnsynced(noteId);
-    _triggerSync();
+    await _touchNote(noteId);
+    scheduleAppSync(trigger: 'AttachmentsRepo.deleteAttachment');
+  }
+
+  Future<void> _touchNote(String noteId) async {
+    await (_db.update(_db.notes)..where((tbl) => tbl.id.equals(noteId))).write(
+      NotesCompanion(updatedAt: drift.Value(DateTime.now().toUtc())),
+    );
   }
 
   /// Add attachment: copy to persistent storage, insert into DB
@@ -337,30 +339,35 @@ class NoteAttachmentsRepository {
                 ),
               ),
             );
+
+        await _touchNote(noteId);
       });
     } catch (e) {
       try {
         await File(persistentPath).delete();
-      } catch (deleteErr) {
-        debugPrint('Failed to clean up file $persistentPath: $deleteErr');
+      } catch (deleteErr, stack) {
+        AppLogger.instance.error(
+          'Attachments',
+          'Failed to clean up file $persistentPath',
+          error: deleteErr,
+          stackTrace: stack,
+        );
       }
       rethrow;
     }
 
-    await _markNoteUnsynced(noteId);
-    _triggerSync();
+    scheduleAppSync(trigger: 'AttachmentsRepo.addAttachment');
     return localId;
-  }
-
-  /// Mark the note as having pending local work so the sync loop picks it up
-  Future<void> _markNoteUnsynced(String noteId) async {
-    await (_db.update(_db.notes)..where((tbl) => tbl.id.equals(noteId))).write(
-      const NotesCompanion(isSynced: drift.Value(false)),
-    );
   }
 
   /// Sync pending uploads and deletes with server
   Future<void> sync() async {
+    final cycleStart = DateTime.now();
+    final failedAttachmentIds = <String>[];
+    int uploaded = 0;
+    int deleted = 0;
+    int skipped = 0;
+
     // 1. Process pending uploads
     final pendingUpload =
         await (_db.select(_db.noteAttachments)..where(
@@ -370,8 +377,34 @@ class NoteAttachmentsRepository {
             ))
             .get();
 
+    // 2. Process pending deletes
+    final pendingDelete =
+        await (_db.select(_db.noteAttachments)..where(
+              (tbl) => tbl.syncStatus.equals(
+                domain.AttachmentSyncStatus.pendingDelete.dbValue,
+              ),
+            ))
+            .get();
+
+    if (pendingUpload.isEmpty && pendingDelete.isEmpty) {
+      return;
+    }
+
+    AppLogger.instance.info(
+      'Attachments',
+      'Attachments sync start: pendingUploads=${pendingUpload.length} '
+          'pendingDeletes=${pendingDelete.length}',
+    );
+
     for (final row in pendingUpload) {
-      if (row.localPath == null) continue;
+      if (row.localPath == null) {
+        AppLogger.instance.warn(
+          'Attachments',
+          'Skip upload ${row.id}: missing localPath (noteId=${row.noteId})',
+        );
+        skipped++;
+        continue;
+      }
       try {
         final attachment = await _uploadToServer(
           row.noteId,
@@ -396,10 +429,15 @@ class NoteAttachmentsRepository {
             '${attachment.id}-${attachment.originalFilename}',
           );
           await File(row.localPath!).rename(cachedPath);
-        } catch (e) {
+        } catch (e, stack) {
           // Rename may fail across filesystems — fall back to delete.
           // The image will be re-downloaded on next view.
-          debugPrint('Failed to move upload to cache: $e');
+          AppLogger.instance.warn(
+            'Attachments',
+            'Failed to move upload to cache',
+            error: e,
+            stackTrace: stack,
+          );
           cachedPath = null;
           try {
             await File(row.localPath!).delete();
@@ -433,20 +471,23 @@ class NoteAttachmentsRepository {
             _db.noteAttachments,
           )..where((tbl) => tbl.id.equals(row.id))).go();
         });
-      } catch (e) {
-        debugPrint('Attachment upload failed for ${row.id}: $e');
+        uploaded++;
+        AppLogger.instance.info(
+          'Attachments',
+          'Uploaded attachment ${attachment.id} for note ${attachment.noteId} '
+              '(${attachment.fileSize}B, ${attachment.mimeType})',
+        );
+      } catch (e, stack) {
+        AppLogger.instance.error(
+          'Attachments',
+          'Attachment upload failed for ${row.id} (noteId=${row.noteId})',
+          error: e,
+          stackTrace: stack,
+        );
+        failedAttachmentIds.add(row.id);
         // Will retry next sync
       }
     }
-
-    // 2. Process pending deletes
-    final pendingDelete =
-        await (_db.select(_db.noteAttachments)..where(
-              (tbl) => tbl.syncStatus.equals(
-                domain.AttachmentSyncStatus.pendingDelete.dbValue,
-              ),
-            ))
-            .get();
 
     for (final row in pendingDelete) {
       final serverId = row.serverAttachmentId ?? row.id;
@@ -455,19 +496,47 @@ class NoteAttachmentsRepository {
         if (row.localPath != null) {
           try {
             await File(row.localPath!).delete();
-          } catch (e) {
-            debugPrint(
-              'Failed to delete local file for attachment ${row.id}: $e',
+          } catch (e, stack) {
+            AppLogger.instance.error(
+              'Attachments',
+              'Failed to delete local file for attachment ${row.id}',
+              error: e,
+              stackTrace: stack,
             );
           }
         }
         await (_db.delete(
           _db.noteAttachments,
         )..where((tbl) => tbl.id.equals(row.id))).go();
-      } catch (e) {
-        debugPrint('Attachment delete failed for ${row.id}: $e');
+        deleted++;
+        AppLogger.instance.info(
+          'Attachments',
+          'Deleted attachment ${row.id} (serverId=$serverId noteId=${row.noteId})',
+        );
+      } catch (e, stack) {
+        AppLogger.instance.error(
+          'Attachments',
+          'Attachment delete failed for ${row.id} (noteId=${row.noteId})',
+          error: e,
+          stackTrace: stack,
+        );
+        failedAttachmentIds.add(row.id);
         // Will retry next sync
       }
+    }
+
+    AppLogger.instance.info(
+      'Attachments',
+      'Attachments sync done in '
+          '${DateTime.now().difference(cycleStart).inMilliseconds}ms: '
+          'uploaded=$uploaded deleted=$deleted skipped=$skipped '
+          'failed=${failedAttachmentIds.length}',
+    );
+
+    if (failedAttachmentIds.isNotEmpty) {
+      throw Exception(
+        'Attachment sync failed for ${failedAttachmentIds.length} attachment(s)',
+      );
     }
   }
 
@@ -506,8 +575,13 @@ class NoteAttachmentsRepository {
       if (noteDir.existsSync()) {
         try {
           await noteDir.delete(recursive: true);
-        } catch (e) {
-          debugPrint('Failed to delete attachment dir ${noteDir.path}: $e');
+        } catch (e, stack) {
+          AppLogger.instance.error(
+            'Attachments',
+            'Failed to delete attachment dir ${noteDir.path}',
+            error: e,
+            stackTrace: stack,
+          );
         }
       }
     }
@@ -524,8 +598,13 @@ class NoteAttachmentsRepository {
       if (row.localPath != null) {
         try {
           await File(row.localPath!).delete();
-        } catch (e) {
-          debugPrint('Failed to delete local file ${row.localPath}: $e');
+        } catch (e, stack) {
+          AppLogger.instance.error(
+            'Attachments',
+            'Failed to delete local file ${row.localPath}',
+            error: e,
+            stackTrace: stack,
+          );
         }
       }
     }
@@ -544,8 +623,13 @@ class NoteAttachmentsRepository {
       if (noteDir.existsSync()) {
         try {
           await noteDir.delete(recursive: true);
-        } catch (e) {
-          debugPrint('Failed to delete attachment dir ${noteDir.path}: $e');
+        } catch (e, stack) {
+          AppLogger.instance.error(
+            'Attachments',
+            'Failed to delete attachment dir ${noteDir.path}',
+            error: e,
+            stackTrace: stack,
+          );
         }
       }
     }
@@ -593,11 +677,17 @@ class NoteAttachmentsRepository {
           const NoteAttachmentsCompanion(localPath: drift.Value(null)),
         );
 
-        debugPrint(
+        AppLogger.instance.info(
+          'Attachments',
           'Evicted cached attachment: ${path.basename(file.path)} ($size bytes)',
         );
-      } catch (e) {
-        debugPrint('Failed to evict cached file ${file.path}: $e');
+      } catch (e, stack) {
+        AppLogger.instance.error(
+          'Attachments',
+          'Failed to evict cached file ${file.path}',
+          error: e,
+          stackTrace: stack,
+        );
       }
     }
   }

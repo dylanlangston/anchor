@@ -1,37 +1,40 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
 import {
   Bold,
-  Italic,
-  Underline,
-  Strikethrough,
+  Code,
   Heading1,
   Heading2,
   Heading3,
-  List,
-  ListOrdered,
-  ListChecks,
-  Quote,
-  Code,
-  Undo2,
-  Redo2,
+  IndentDecrease,
+  IndentIncrease,
+  Italic,
   Link as LinkIcon,
-  Type,
-  Globe,
+  List,
+  ListChecks,
+  ListOrdered,
+  Quote,
+  Redo2,
+  Strikethrough,
+  Underline,
+  Undo2,
 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { cn } from "@/lib/utils";
 import type { QuillInstance } from "@/features/notes";
-import { LIST_FORMATS } from "@/features/notes";
+import { applyListIndent, LIST_FORMATS } from "@/features/notes";
+import { MAX_LIST_INDENT } from "@/features/notes/quill-lines";
+import { cn } from "@/lib/utils";
+
+/**
+ * Formats at the selection without argument-less getFormat()'s
+ * focus-and-scroll side effect. Button handlers keep getFormat(): its
+ * focus-first read sees the cursor's formats after a click steals focus.
+ */
+function selectionFormat(quill: QuillInstance): Record<string, unknown> {
+  const sel = quill.getSelection();
+  return sel ? (quill.getFormat(sel.index, sel.length) ?? {}) : {};
+}
 
 function toggleInlineFormat(quill: QuillInstance, key: string) {
   const current = quill.getFormat() ?? {};
@@ -43,13 +46,17 @@ function toggleHeader(quill: QuillInstance, level: 1 | 2 | 3) {
   quill.format("header", current.header === level ? false : level, "user");
 }
 
-function toggleList(quill: QuillInstance, value: "ordered" | "bullet" | "unchecked") {
+function toggleList(
+  quill: QuillInstance,
+  value: "ordered" | "bullet" | "unchecked",
+) {
   const current = quill.getFormat() ?? {};
   const currentList = current.list as string | undefined;
 
   if (value === LIST_FORMATS.UNCHECKED) {
     const isChecklist =
-      currentList === LIST_FORMATS.CHECKED || currentList === LIST_FORMATS.UNCHECKED;
+      currentList === LIST_FORMATS.CHECKED ||
+      currentList === LIST_FORMATS.UNCHECKED;
     quill.format("list", isChecklist ? false : LIST_FORMATS.UNCHECKED, "user");
     return;
   }
@@ -66,31 +73,31 @@ interface QuillToolbarProps {
   getQuill: () => QuillInstance | null;
   isFocused: boolean;
   updateKey: number;
+  onOpenLinkDialog: () => void;
 }
 
-export function QuillToolbar({ getQuill, isFocused, updateKey }: QuillToolbarProps) {
+export function QuillToolbar({
+  getQuill,
+  isFocused,
+  updateKey,
+  onOpenLinkDialog,
+}: QuillToolbarProps) {
   const [format, setFormat] = useState<Record<string, unknown>>({});
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
 
-  const [linkDialogOpen, setLinkDialogOpen] = useState(false);
-  const [linkText, setLinkText] = useState("");
-  const [linkUrl, setLinkUrl] = useState("");
-
-  // Update toolbar state when parent signals a change (via updateKey)
-  // This avoids subscribing to Quill events directly, which caused focus issues
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `updateKey` is an intentional re-sync signal bumped by the parent on every Quill change; it has no in-body reference by design
   useEffect(() => {
     const quill = getQuill();
-    if (!quill || !isFocused) {
-      if (!isFocused) {
-        setFormat({});
-        setCanUndo(false);
-        setCanRedo(false);
-      }
+    if (!quill) {
+      setFormat({});
+      setCanUndo(false);
+      setCanRedo(false);
       return;
     }
 
-    setFormat(quill.getFormat() ?? {});
+    // Format highlights need a cursor; undo/redo must work unfocused.
+    setFormat(isFocused ? selectionFormat(quill) : {});
     const hist = quill.history;
     setCanUndo(Boolean(hist?.stack?.undo?.length));
     setCanRedo(Boolean(hist?.stack?.redo?.length));
@@ -98,6 +105,12 @@ export function QuillToolbar({ getQuill, isFocused, updateKey }: QuillToolbarPro
 
   // Get quill instance for button handlers
   const quill = getQuill();
+
+  const changeIndent = (direction: 1 | -1) => {
+    const sel = quill?.getSelection();
+    if (!quill || !sel) return;
+    applyListIndent(quill, sel, direction);
+  };
 
   const headerLevel = useMemo(() => {
     const h = format.header;
@@ -109,6 +122,11 @@ export function QuillToolbar({ getQuill, isFocused, updateKey }: QuillToolbarPro
     listValue === LIST_FORMATS.CHECKED || listValue === LIST_FORMATS.UNCHECKED;
   const isOrdered = listValue === LIST_FORMATS.ORDERED;
   const isBullet = listValue === LIST_FORMATS.BULLET;
+  // Bound check for the buttons; the handler applies the exact
+  // one-level-below-the-line-above rule.
+  const indentLevel = typeof format.indent === "number" ? format.indent : 0;
+  const canIndent = Boolean(listValue) && indentLevel < MAX_LIST_INDENT;
+  const canOutdent = Boolean(listValue) && indentLevel > 0;
 
   const isBold = Boolean(format.bold);
   const isItalic = Boolean(format.italic);
@@ -122,263 +140,205 @@ export function QuillToolbar({ getQuill, isFocused, updateKey }: QuillToolbarPro
   const btnClass = (active?: boolean) =>
     cn(
       "h-8 w-8 rounded-full p-0 shrink-0 transition-colors duration-100",
-      active ? "bg-muted/60 text-foreground" : "text-muted-foreground hover:text-foreground hover:bg-muted/30",
+      active
+        ? "bg-muted/60 text-foreground"
+        : "text-muted-foreground hover:text-foreground hover:bg-muted/30",
     );
 
-  const openLinkDialog = () => {
-    if (!quill) return;
-    const sel = quill.getSelection();
-    const text = sel && sel.length ? quill.getText(sel.index, sel.length) ?? "" : "";
-    setLinkText(text);
-    setLinkUrl("");
-    setLinkDialogOpen(true);
-  };
-
-  const submitLink = () => {
-    if (!quill) return;
-    const url = linkUrl.trim();
-    if (!url) return;
-
-    const sel = quill.getSelection(true);
-    if (!sel) return;
-
-    if (sel.length === 0) {
-      const text = linkText.trim() || url;
-      quill.insertText(sel.index, text, "user");
-      quill.formatText(sel.index, text.length, "link", url, "user");
-      quill.setSelection(sel.index + text.length, 0, "user");
-    } else {
-      quill.format("link", url, "user");
-    }
-
-    setLinkDialogOpen(false);
-  };
-
   return (
-    <>
-      <div className="flex items-center overflow-x-auto scrollbar-none -mx-4 px-4 lg:mx-0 lg:px-0 lg:overflow-visible lg:flex-wrap gap-0.5">
-        <div className={groupClass}>
-          <Button
-            type="button"
-            variant="ghost"
-            className={btnClass(false)}
-            disabled={!quill || !canUndo}
-            title="Undo"
-            onClick={() => quill?.history?.undo?.()}
-          >
-            <Undo2 className="h-4 w-4" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className={btnClass(false)}
-            disabled={!quill || !canRedo}
-            title="Redo"
-            onClick={() => quill?.history?.redo?.()}
-          >
-            <Redo2 className="h-4 w-4" />
-          </Button>
-        </div>
-
-        <div className={dividerClass} />
-
-        <div className={groupClass}>
-          <Button
-            type="button"
-            variant="ghost"
-            className={btnClass(isBold)}
-            disabled={!quill}
-            title="Bold"
-            onClick={() => quill && toggleInlineFormat(quill, "bold")}
-          >
-            <Bold className="h-4 w-4" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className={btnClass(isItalic)}
-            disabled={!quill}
-            title="Italic"
-            onClick={() => quill && toggleInlineFormat(quill, "italic")}
-          >
-            <Italic className="h-4 w-4" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className={btnClass(isUnderline)}
-            disabled={!quill}
-            title="Underline"
-            onClick={() => quill && toggleInlineFormat(quill, "underline")}
-          >
-            <Underline className="h-4 w-4" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className={btnClass(isStrike)}
-            disabled={!quill}
-            title="Strikethrough"
-            onClick={() => quill && toggleInlineFormat(quill, "strike")}
-          >
-            <Strikethrough className="h-4 w-4" />
-          </Button>
-        </div>
-
-        <div className={dividerClass} />
-
-        <div className={groupClass}>
-          <Button
-            type="button"
-            variant="ghost"
-            className={btnClass(headerLevel === 1)}
-            disabled={!quill}
-            title="Heading 1"
-            onClick={() => quill && toggleHeader(quill, 1)}
-          >
-            <Heading1 className="h-4 w-4" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className={btnClass(headerLevel === 2)}
-            disabled={!quill}
-            title="Heading 2"
-            onClick={() => quill && toggleHeader(quill, 2)}
-          >
-            <Heading2 className="h-4 w-4" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className={btnClass(headerLevel === 3)}
-            disabled={!quill}
-            title="Heading 3"
-            onClick={() => quill && toggleHeader(quill, 3)}
-          >
-            <Heading3 className="h-4 w-4" />
-          </Button>
-        </div>
-
-        <div className={dividerClass} />
-
-        <div className={groupClass}>
-          <Button
-            type="button"
-            variant="ghost"
-            className={btnClass(isChecklist)}
-            disabled={!quill}
-            title="Checklist"
-            onClick={() => quill && toggleList(quill, "unchecked")}
-          >
-            <ListChecks className="h-4 w-4" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className={btnClass(isOrdered)}
-            disabled={!quill}
-            title="Numbered list"
-            onClick={() => quill && toggleList(quill, "ordered")}
-          >
-            <ListOrdered className="h-4 w-4" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className={btnClass(isBullet)}
-            disabled={!quill}
-            title="Bullet list"
-            onClick={() => quill && toggleList(quill, "bullet")}
-          >
-            <List className="h-4 w-4" />
-          </Button>
-        </div>
-
-        <div className={dividerClass} />
-
-        <div className={groupClass}>
-          <Button
-            type="button"
-            variant="ghost"
-            className={btnClass(isQuote)}
-            disabled={!quill}
-            title="Quote"
-            onClick={() => quill && toggleBlock(quill, "blockquote")}
-          >
-            <Quote className="h-4 w-4" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className={btnClass(isCode)}
-            disabled={!quill}
-            title="Code block"
-            onClick={() => quill && toggleBlock(quill, "code-block")}
-          >
-            <Code className="h-4 w-4" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className={btnClass(false)}
-            disabled={!quill}
-            title="Insert link"
-            onClick={openLinkDialog}
-          >
-            <LinkIcon className="h-4 w-4" />
-          </Button>
-        </div>
+    <div className="flex items-center overflow-x-auto scrollbar-none -mx-4 px-4 lg:mx-0 lg:px-0 lg:overflow-visible lg:flex-wrap gap-0.5">
+      <div className={groupClass}>
+        <Button
+          type="button"
+          variant="ghost"
+          className={btnClass(false)}
+          disabled={!quill || !canUndo}
+          title="Undo"
+          onClick={() => quill?.history?.undo?.()}
+        >
+          <Undo2 className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          className={btnClass(false)}
+          disabled={!quill || !canRedo}
+          title="Redo"
+          onClick={() => quill?.history?.redo?.()}
+        >
+          <Redo2 className="h-4 w-4" />
+        </Button>
       </div>
 
-      <Dialog open={linkDialogOpen} onOpenChange={setLinkDialogOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-accent/10 flex items-center justify-center">
-                <LinkIcon className="h-5 w-5 text-accent" />
-              </div>
-              Insert Link
-            </DialogTitle>
-          </DialogHeader>
+      <div className={dividerClass} />
 
-          <div className="grid gap-3">
-            <div className="relative">
-              <Type className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input
-                value={linkText}
-                onChange={(e) => setLinkText(e.target.value)}
-                placeholder="Link text"
-                className="pl-9"
-              />
-            </div>
-            <div className="relative">
-              <Globe className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input
-                value={linkUrl}
-                onChange={(e) => setLinkUrl(e.target.value)}
-                placeholder="https://..."
-                className="pl-9"
-                inputMode="url"
-              />
-            </div>
-          </div>
+      <div className={groupClass}>
+        <Button
+          type="button"
+          variant="ghost"
+          className={btnClass(isBold)}
+          disabled={!quill}
+          title="Bold"
+          onClick={() => quill && toggleInlineFormat(quill, "bold")}
+        >
+          <Bold className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          className={btnClass(isItalic)}
+          disabled={!quill}
+          title="Italic"
+          onClick={() => quill && toggleInlineFormat(quill, "italic")}
+        >
+          <Italic className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          className={btnClass(isUnderline)}
+          disabled={!quill}
+          title="Underline"
+          onClick={() => quill && toggleInlineFormat(quill, "underline")}
+        >
+          <Underline className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          className={btnClass(isStrike)}
+          disabled={!quill}
+          title="Strikethrough"
+          onClick={() => quill && toggleInlineFormat(quill, "strike")}
+        >
+          <Strikethrough className="h-4 w-4" />
+        </Button>
+      </div>
 
-          <DialogFooter className="gap-2 sm:gap-0">
-            <Button type="button" variant="ghost" onClick={() => setLinkDialogOpen(false)}>
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              onClick={submitLink}
-              disabled={!linkUrl.trim()}
-              className="bg-accent text-accent-foreground hover:bg-accent/90"
-            >
-              Insert
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
+      <div className={dividerClass} />
+
+      <div className={groupClass}>
+        <Button
+          type="button"
+          variant="ghost"
+          className={btnClass(headerLevel === 1)}
+          disabled={!quill}
+          title="Heading 1"
+          onClick={() => quill && toggleHeader(quill, 1)}
+        >
+          <Heading1 className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          className={btnClass(headerLevel === 2)}
+          disabled={!quill}
+          title="Heading 2"
+          onClick={() => quill && toggleHeader(quill, 2)}
+        >
+          <Heading2 className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          className={btnClass(headerLevel === 3)}
+          disabled={!quill}
+          title="Heading 3"
+          onClick={() => quill && toggleHeader(quill, 3)}
+        >
+          <Heading3 className="h-4 w-4" />
+        </Button>
+      </div>
+
+      <div className={dividerClass} />
+
+      <div className={groupClass}>
+        <Button
+          type="button"
+          variant="ghost"
+          className={btnClass(isChecklist)}
+          disabled={!quill}
+          title="Checklist"
+          onClick={() => quill && toggleList(quill, "unchecked")}
+        >
+          <ListChecks className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          className={btnClass(isOrdered)}
+          disabled={!quill}
+          title="Numbered list"
+          onClick={() => quill && toggleList(quill, "ordered")}
+        >
+          <ListOrdered className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          className={btnClass(isBullet)}
+          disabled={!quill}
+          title="Bullet list"
+          onClick={() => quill && toggleList(quill, "bullet")}
+        >
+          <List className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          className={btnClass(false)}
+          disabled={!quill || !canOutdent}
+          title="Outdent"
+          onClick={() => changeIndent(-1)}
+        >
+          <IndentDecrease className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          className={btnClass(false)}
+          disabled={!quill || !canIndent}
+          title="Indent"
+          onClick={() => changeIndent(1)}
+        >
+          <IndentIncrease className="h-4 w-4" />
+        </Button>
+      </div>
+
+      <div className={dividerClass} />
+
+      <div className={groupClass}>
+        <Button
+          type="button"
+          variant="ghost"
+          className={btnClass(isQuote)}
+          disabled={!quill}
+          title="Quote"
+          onClick={() => quill && toggleBlock(quill, "blockquote")}
+        >
+          <Quote className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          className={btnClass(isCode)}
+          disabled={!quill}
+          title="Code block"
+          onClick={() => quill && toggleBlock(quill, "code-block")}
+        >
+          <Code className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          className={btnClass(Boolean(format.link))}
+          disabled={!quill}
+          title={format.link ? "Edit link" : "Insert link"}
+          onClick={onOpenLinkDialog}
+        >
+          <LinkIcon className="h-4 w-4" />
+        </Button>
+      </div>
+    </div>
   );
 }

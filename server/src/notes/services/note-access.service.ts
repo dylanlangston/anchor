@@ -5,20 +5,18 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import {
-  NoteSharePermission,
-  NoteState,
-} from 'src/generated/prisma/enums';
+import { NoteSharePermission, NoteState } from 'src/generated/prisma/enums';
 
 export interface NoteAccessResult {
   hasAccess: boolean;
   isOwner: boolean;
   permission?: NoteSharePermission | 'owner';
+  state?: NoteState;
 }
 
 @Injectable()
 export class NoteAccessService {
-  constructor(private prisma: PrismaService) { }
+  constructor(private prisma: PrismaService) {}
 
   /**
    * Check if user has access to a note and return permission info
@@ -38,7 +36,12 @@ export class NoteAccessService {
 
     // Check if user is owner
     if (note.userId === userId) {
-      return { hasAccess: true, isOwner: true, permission: 'owner' };
+      return {
+        hasAccess: true,
+        isOwner: true,
+        permission: 'owner',
+        state: note.state,
+      };
     }
 
     // Check if user has share access
@@ -64,6 +67,7 @@ export class NoteAccessService {
             hasAccess: false,
             isOwner: false,
             permission: share.permission,
+            state: note.state,
           };
         }
       }
@@ -74,6 +78,7 @@ export class NoteAccessService {
       hasAccess: true,
       isOwner: false,
       permission: share.permission,
+      state: note.state,
     };
   }
 

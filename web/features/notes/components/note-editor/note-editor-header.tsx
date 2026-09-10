@@ -1,28 +1,28 @@
 "use client";
 
 import {
-  ArrowLeft,
-  Trash2,
-  Pin,
-  PinOff,
-  Loader2,
-  Check,
   Archive,
   ArchiveRestore,
+  ArrowLeft,
+  Check,
   Eye,
+  History,
+  Loader2,
+  Pin,
+  PinOff,
   RotateCcw,
+  Trash2,
   UserPlus,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Tooltip,
   TooltipContent,
-  TooltipTrigger,
   TooltipProvider,
+  TooltipTrigger,
 } from "@/components/ui/tooltip";
-import {
-  NoteBackgroundPicker,
-} from "@/features/notes";
+import { NoteBackgroundPicker, ReminderPicker } from "@/features/notes";
+import type { NoteReminder } from "@/features/notes/types";
 import { cn } from "@/lib/utils";
 
 interface NoteEditorHeaderProps {
@@ -31,6 +31,7 @@ interface NoteEditorHeaderProps {
   isPinned: boolean;
   isArchived: boolean;
   background: string | null;
+  reminder: NoteReminder | null;
   isSaving: boolean;
   hasUnsavedChanges: boolean;
   isSaved: boolean;
@@ -41,11 +42,13 @@ interface NoteEditorHeaderProps {
   onBack: () => void;
   onTogglePin: () => void;
   onBackgroundChange: (background: string | null) => void;
+  onReminderChange: (reminder: NoteReminder | null) => void;
   onArchiveClick: () => void;
   onDeleteClick: () => void;
   onRestoreClick: () => void;
   onPermanentDeleteClick: () => void;
   onShareClick?: () => void;
+  onHistoryClick?: () => void;
   restorePending?: boolean;
   permanentDeletePending?: boolean;
 }
@@ -56,6 +59,7 @@ export function NoteEditorHeader({
   isPinned,
   isArchived,
   background,
+  reminder,
   isSaving,
   hasUnsavedChanges,
   isSaved,
@@ -66,11 +70,13 @@ export function NoteEditorHeader({
   onBack,
   onTogglePin,
   onBackgroundChange,
+  onReminderChange,
   onArchiveClick,
   onDeleteClick,
   onRestoreClick,
   onPermanentDeleteClick,
   onShareClick,
+  onHistoryClick,
   restorePending = false,
   permanentDeletePending = false,
 }: NoteEditorHeaderProps) {
@@ -80,7 +86,7 @@ export function NoteEditorHeader({
         className={cn(
           "sticky top-0 z-40 flex h-16 items-center justify-between",
           "border-b border-border/30 backdrop-blur-sm px-4 lg:px-6",
-          "bg-background/60 dark:bg-background/40"
+          "bg-background/60 dark:bg-background/40",
         )}
       >
         <Tooltip>
@@ -106,9 +112,10 @@ export function NoteEditorHeader({
                 "backdrop-blur-sm",
                 isSaving && "bg-muted/80 text-muted-foreground",
                 hasUnsavedChanges &&
-                !isSaving &&
-                "bg-amber-500/20 text-amber-600 dark:text-amber-400",
-                isSaved && "bg-emerald-500/20 text-emerald-600 dark:text-emerald-400"
+                  !isSaving &&
+                  "bg-amber-500/20 text-amber-600 dark:text-amber-400",
+                isSaved &&
+                  "bg-emerald-500/20 text-emerald-600 dark:text-emerald-400",
               )}
             >
               {isSaving ? (
@@ -135,7 +142,11 @@ export function NoteEditorHeader({
             <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium backdrop-blur-sm bg-muted/80 text-muted-foreground">
               <Eye className="h-3 w-3" />
               <span>
-                {isReadOnly ? "Read-only" : permission === "viewer" ? "Viewer" : "Read-only"}
+                {isReadOnly
+                  ? "Read-only"
+                  : permission === "viewer"
+                    ? "Viewer"
+                    : "Read-only"}
               </span>
             </div>
           )}
@@ -152,6 +163,12 @@ export function NoteEditorHeader({
                 disabled={isReadOnly}
               />
 
+              <ReminderPicker
+                reminder={reminder}
+                onReminderChange={onReminderChange}
+                disabled={isReadOnly}
+              />
+
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
@@ -161,7 +178,7 @@ export function NoteEditorHeader({
                     disabled={isReadOnly}
                     className={cn(
                       "h-9 w-9 rounded-xl transition-colors",
-                      isPinned && "text-accent bg-accent/10"
+                      isPinned && "text-accent bg-accent/10",
                     )}
                   >
                     {isPinned ? (
@@ -178,6 +195,22 @@ export function NoteEditorHeader({
             </>
           )}
 
+          {!isNew && onHistoryClick && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={onHistoryClick}
+                  className="h-9 w-9 rounded-xl"
+                >
+                  <History className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">Version history</TooltipContent>
+            </Tooltip>
+          )}
+
           {!isNew && isOwner && !isTrashed && onShareClick && (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -187,7 +220,7 @@ export function NoteEditorHeader({
                   onClick={onShareClick}
                   className={cn(
                     "h-9 w-9 rounded-xl transition-colors",
-                    hasShares && "text-primary bg-primary/10"
+                    hasShares && "text-primary bg-primary/10",
                   )}
                 >
                   <UserPlus className="h-4 w-4" />
@@ -199,99 +232,97 @@ export function NoteEditorHeader({
             </Tooltip>
           )}
 
-          {!isNew && (
-            <>
-              {isTrashed ? (
-                <>
-                  {/* Restore button (only for trashed notes) */}
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={onRestoreClick}
-                        disabled={restorePending}
-                        className={cn(
-                          "h-9 w-9 rounded-xl transition-colors",
-                          "text-primary bg-primary/10"
-                        )}
-                      >
-                        <RotateCcw className="h-4 w-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom">Restore note</TooltipContent>
-                  </Tooltip>
+          {!isNew &&
+            (isTrashed ? (
+              <>
+                {/* Restore button (only for trashed notes) */}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={onRestoreClick}
+                      disabled={restorePending}
+                      className={cn(
+                        "h-9 w-9 rounded-xl transition-colors",
+                        "text-primary bg-primary/10",
+                      )}
+                    >
+                      <RotateCcw className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">Restore note</TooltipContent>
+                </Tooltip>
 
-                  {/* Permanent Delete button (only for trashed notes) */}
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={onPermanentDeleteClick}
-                        disabled={permanentDeletePending}
-                        className="h-9 w-9 rounded-xl text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-                      >
-                        {permanentDeletePending ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
+                {/* Permanent Delete button (only for trashed notes) */}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={onPermanentDeleteClick}
+                      disabled={permanentDeletePending}
+                      className="h-9 w-9 rounded-xl text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                    >
+                      {permanentDeletePending ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-4 w-4" />
+                      )}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">Delete forever</TooltipContent>
+                </Tooltip>
+              </>
+            ) : (
+              <>
+                {/* Archive and Delete only for owners */}
+                {isOwner && (
+                  <>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={onArchiveClick}
+                          className={cn(
+                            "h-9 w-9 rounded-xl transition-colors",
+                            isArchived && "text-primary bg-primary/10",
+                          )}
+                        >
+                          {isArchived ? (
+                            <ArchiveRestore className="h-4 w-4" />
+                          ) : (
+                            <Archive className="h-4 w-4" />
+                          )}
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom">
+                        {isArchived ? "Unarchive note" : "Archive note"}
+                      </TooltipContent>
+                    </Tooltip>
+
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={onDeleteClick}
+                          className="h-9 w-9 rounded-xl text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                        >
                           <Trash2 className="h-4 w-4" />
-                        )}
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom">Delete forever</TooltipContent>
-                  </Tooltip>
-                </>
-              ) : (
-                <>
-                  {/* Archive and Delete only for owners */}
-                  {isOwner && (
-                    <>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={onArchiveClick}
-                            className={cn(
-                              "h-9 w-9 rounded-xl transition-colors",
-                              isArchived && "text-primary bg-primary/10"
-                            )}
-                          >
-                            {isArchived ? (
-                              <ArchiveRestore className="h-4 w-4" />
-                            ) : (
-                              <Archive className="h-4 w-4" />
-                            )}
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent side="bottom">
-                          {isArchived ? "Unarchive note" : "Archive note"}
-                        </TooltipContent>
-                      </Tooltip>
-
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={onDeleteClick}
-                            className="h-9 w-9 rounded-xl text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent side="bottom">Move to trash</TooltipContent>
-                      </Tooltip>
-                    </>
-                  )}
-                </>
-              )}
-            </>
-          )}
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom">
+                        Move to trash
+                      </TooltipContent>
+                    </Tooltip>
+                  </>
+                )}
+              </>
+            ))}
         </div>
       </header>
     </TooltipProvider>
   );
 }
-

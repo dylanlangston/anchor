@@ -1,8 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_quill/flutter_quill.dart';
-import 'package:google_fonts/google_fonts.dart';
-import 'package:lucide_icons/lucide_icons.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import 'checklist_lines.dart';
+import 'link_utils.dart';
+import '../../theme/context_extensions.dart';
+import '../../theme/tokens/app_durations.dart';
+import '../../theme/tokens/app_icon_sizes.dart';
+import '../../theme/tokens/app_radius.dart';
 
 /// Formatting state for the editor toolbar
 class EditorFormattingState {
@@ -16,8 +22,12 @@ class EditorFormattingState {
   final bool isQuote;
   final bool isCode;
   final int headerLevel;
+  final int indentLevel;
   final bool canUndo;
   final bool canRedo;
+  final String? linkUrl;
+  final int linkStart;
+  final int linkLength;
 
   const EditorFormattingState({
     this.isBold = false,
@@ -30,15 +40,30 @@ class EditorFormattingState {
     this.isQuote = false,
     this.isCode = false,
     this.headerLevel = 0,
+    this.indentLevel = 0,
     this.canUndo = false,
     this.canRedo = false,
+    this.linkUrl,
+    this.linkStart = 0,
+    this.linkLength = 0,
   });
+
+  bool get isList => isBulletList || isNumberedList || isChecklist;
+
+  /// Buttons show the cheap bound check; the tap handler applies the exact
+  /// one-level-below-the-line-above rule.
+  bool get canIndent => isList && indentLevel < maxListIndent;
+  bool get canOutdent => isList && indentLevel > 0;
 
   /// Create formatting state from QuillController
   factory EditorFormattingState.fromController(QuillController controller) {
     final style = controller.getSelectionStyle();
     final listValue = style.attributes[Attribute.list.key]?.value;
     final header = style.attributes[Attribute.header.key];
+    // linkAtSelection walks the whole document.
+    final link = style.attributes.containsKey(Attribute.link.key)
+        ? linkAtSelection(controller)
+        : null;
 
     return EditorFormattingState(
       isBold: style.attributes.containsKey(Attribute.bold.key),
@@ -53,8 +78,12 @@ class EditorFormattingState {
       isQuote: style.attributes.containsKey(Attribute.blockQuote.key),
       isCode: style.attributes.containsKey(Attribute.codeBlock.key),
       headerLevel: header?.value is int ? header!.value as int : 0,
+      indentLevel: style.attributes[Attribute.indent.key]?.value as int? ?? 0,
       canUndo: controller.hasUndo,
       canRedo: controller.hasRedo,
+      linkUrl: link?.url,
+      linkStart: link?.start ?? 0,
+      linkLength: link?.length ?? 0,
     );
   }
 }
@@ -75,14 +104,15 @@ class EditorToolbar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final dims = context.dims;
     final bottomPadding = MediaQuery.of(context).viewPadding.bottom;
     final isDark = theme.brightness == Brightness.dark;
 
     return Container(
       padding: EdgeInsets.only(
-        left: 12,
-        right: 12,
-        top: 8,
+        left: dims.sm,
+        right: dims.sm,
+        top: dims.xs,
         bottom: bottomPadding > 0 ? bottomPadding + 4 : 12,
       ),
       decoration: BoxDecoration(
@@ -125,7 +155,7 @@ class EditorToolbar extends StatelessWidget {
                 ),
               ],
             ),
-            _buildDivider(theme),
+            _buildDivider(context, theme),
 
             // Text styles
             _ToolbarGroup(
@@ -156,7 +186,7 @@ class EditorToolbar extends StatelessWidget {
                 ),
               ],
             ),
-            _buildDivider(theme),
+            _buildDivider(context, theme),
 
             // Headers
             _ToolbarGroup(
@@ -181,7 +211,7 @@ class EditorToolbar extends StatelessWidget {
                 ),
               ],
             ),
-            _buildDivider(theme),
+            _buildDivider(context, theme),
 
             // Lists
             _ToolbarGroup(
@@ -204,9 +234,21 @@ class EditorToolbar extends StatelessWidget {
                   onTap: () => _toggleList(Attribute.ul),
                   tooltip: 'Bullet List',
                 ),
+                _ToolbarButtonData(
+                  icon: LucideIcons.indentDecrease,
+                  isEnabled: state.canOutdent,
+                  onTap: () => _changeIndent(increase: false),
+                  tooltip: 'Outdent',
+                ),
+                _ToolbarButtonData(
+                  icon: LucideIcons.indentIncrease,
+                  isEnabled: state.canIndent,
+                  onTap: () => _changeIndent(increase: true),
+                  tooltip: 'Indent',
+                ),
               ],
             ),
-            _buildDivider(theme),
+            _buildDivider(context, theme),
 
             // Blocks
             _ToolbarGroup(
@@ -225,8 +267,9 @@ class EditorToolbar extends StatelessWidget {
                 ),
                 _ToolbarButtonData(
                   icon: LucideIcons.link,
+                  isActive: state.linkUrl != null,
                   onTap: onLinkPressed ?? () {},
-                  tooltip: 'Link',
+                  tooltip: state.linkUrl != null ? 'Edit link' : 'Link',
                 ),
               ],
             ),
@@ -236,9 +279,9 @@ class EditorToolbar extends StatelessWidget {
     );
   }
 
-  Widget _buildDivider(ThemeData theme) {
+  Widget _buildDivider(BuildContext context, ThemeData theme) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8),
+      padding: EdgeInsets.symmetric(horizontal: context.dims.xs),
       child: Container(
         width: 1,
         height: 24,
@@ -310,6 +353,19 @@ class EditorToolbar extends StatelessWidget {
       isActive ? Attribute.clone(attribute, null) : attribute,
     );
   }
+
+  void _changeIndent({required bool increase}) {
+    final selection = controller.selection;
+    if (!selection.isValid) return;
+    final delta = buildListIndentDelta(
+      parseDocumentLines(controller.document),
+      selection.start,
+      selection.end,
+      increase: increase,
+    );
+    if (delta == null) return;
+    controller.compose(delta, selection, ChangeSource.local);
+  }
 }
 
 // Private helper classes
@@ -344,9 +400,9 @@ class _ToolbarGroup extends StatelessWidget {
         color: isDark
             ? theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.5)
             : theme.colorScheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: AppRadius.smBorder,
       ),
-      padding: const EdgeInsets.all(4),
+      padding: EdgeInsets.all(context.dims.xxs),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: buttons.map((btn) => _ToolbarButton(data: btn)).toList(),
@@ -383,7 +439,7 @@ class _ToolbarButton extends StatelessWidget {
               }
             : null,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
+          duration: AppDurations.fast,
           curve: Curves.easeOut,
           width: 36,
           height: 36,
@@ -393,12 +449,12 @@ class _ToolbarButton extends StatelessWidget {
                 : (data.isActive
                       ? activeColor.withValues(alpha: isDark ? 0.25 : 0.15)
                       : Colors.transparent),
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: AppRadius.xsBorder,
           ),
           child: Center(
             child: Icon(
               data.icon,
-              size: 20,
+              size: AppIconSizes.md,
               color: hasEnabledState
                   ? (isEnabled ? inactiveColor : disabledColor)
                   : (data.isActive ? activeColor : inactiveColor),
@@ -406,130 +462,6 @@ class _ToolbarButton extends StatelessWidget {
           ),
         ),
       ),
-    );
-  }
-}
-
-/// Dialog for inserting links
-class LinkInsertDialog extends StatefulWidget {
-  final String initialText;
-  final void Function(String text, String url) onSubmit;
-
-  const LinkInsertDialog({
-    super.key,
-    required this.initialText,
-    required this.onSubmit,
-  });
-
-  @override
-  State<LinkInsertDialog> createState() => _LinkInsertDialogState();
-}
-
-class _LinkInsertDialogState extends State<LinkInsertDialog> {
-  late final TextEditingController _textController;
-  late final TextEditingController _urlController;
-
-  @override
-  void initState() {
-    super.initState();
-    _textController = TextEditingController(text: widget.initialText);
-    _urlController = TextEditingController();
-  }
-
-  @override
-  void dispose() {
-    _textController.dispose();
-    _urlController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    return AlertDialog(
-      backgroundColor: theme.colorScheme.surface,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      title: Row(
-        children: [
-          Icon(LucideIcons.link, color: theme.colorScheme.tertiary, size: 24),
-          const SizedBox(width: 12),
-          Text(
-            'Insert Link',
-            style: GoogleFonts.dmSans(
-              fontWeight: FontWeight.w600,
-              fontSize: 18,
-            ),
-          ),
-        ],
-      ),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: _textController,
-            decoration: InputDecoration(
-              labelText: 'Text',
-              labelStyle: GoogleFonts.dmSans(),
-              hintText: 'Link text',
-              prefixIcon: const Icon(LucideIcons.type, size: 18),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-            ),
-            style: GoogleFonts.dmSans(),
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _urlController,
-            decoration: InputDecoration(
-              labelText: 'URL',
-              labelStyle: GoogleFonts.dmSans(),
-              hintText: 'https://...',
-              prefixIcon: const Icon(LucideIcons.globe, size: 18),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-            ),
-            style: GoogleFonts.dmSans(),
-            keyboardType: TextInputType.url,
-          ),
-        ],
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: Text(
-            'Cancel',
-            style: GoogleFonts.dmSans(
-              color: theme.colorScheme.onSurface.withValues(alpha: 0.7),
-            ),
-          ),
-        ),
-        FilledButton(
-          onPressed: () {
-            final text = _textController.text.trim();
-            final url = _urlController.text.trim();
-            if (text.isNotEmpty && url.isNotEmpty) {
-              widget.onSubmit(text, url);
-              Navigator.pop(context);
-            }
-          },
-          style: FilledButton.styleFrom(
-            backgroundColor: theme.colorScheme.tertiary,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-            ),
-          ),
-          child: Text(
-            'Insert',
-            style: GoogleFonts.dmSans(
-              fontWeight: FontWeight.w600,
-              color: Colors.white,
-            ),
-          ),
-        ),
-      ],
     );
   }
 }

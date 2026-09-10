@@ -2,10 +2,10 @@
 
 import type { RefObject } from "react";
 import { Input } from "@/components/ui/input";
-import { RichTextEditor, type RichTextEditorHandle } from "../editor";
 import { TagSelector } from "@/features/tags";
 import { cn } from "@/lib/utils";
 import { AttachmentsCollapsible } from "../attachments";
+import { RichTextEditor, type RichTextEditorHandle } from "../editor";
 
 interface NoteEditorContentProps {
   noteId?: string;
@@ -53,19 +53,19 @@ export function NoteEditorContent({
         {/* Title */}
         <Input
           ref={titleInputRef}
-          value={title}
+          value={isReadOnly ? title || "Untitled" : title}
           onChange={(e) => !isReadOnly && onTitleChange(e.target.value)}
           placeholder="Title"
           disabled={isTrashed}
           readOnly={isReadOnly}
           className={cn(
-            "!bg-transparent border-0 shadow-none rounded-none",
+            "bg-transparent! border-0 shadow-none rounded-none",
             "px-0 h-auto py-2 mb-2",
             "text-3xl lg:text-4xl font-bold",
             "placeholder:text-muted-foreground/40",
             "focus-visible:ring-0 focus-visible:ring-offset-0 focus-visible:border-0",
             isReadOnly && "cursor-default",
-            !isTrashed && isReadOnly && "text-foreground"
+            !isTrashed && isReadOnly && "text-foreground",
           )}
         />
 

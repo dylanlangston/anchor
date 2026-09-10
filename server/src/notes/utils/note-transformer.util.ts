@@ -1,7 +1,17 @@
-import { NoteSharePermission } from 'src/generated/prisma/enums';
+import {
+  NoteSharePermission,
+  ReminderRecurrence,
+} from 'src/generated/prisma/enums';
 
 // Type definitions for transformed note structures
 export type NotePermission = 'owner' | NoteSharePermission;
+
+// remindAt is a local wall clock ("YYYY-MM-DDTHH:mm"), not an instant.
+export interface TransformedReminder {
+  remindAt: string;
+  recurrence: ReminderRecurrence;
+  version: number;
+}
 
 interface SharedByUser {
   id: string;
@@ -14,6 +24,7 @@ export interface TransformedNote {
   id: string;
   title: string;
   content: string | null;
+  version: number;
   isPinned: boolean;
   isArchived: boolean;
   background: string | null;
@@ -27,6 +38,8 @@ export interface TransformedNote {
   sharedBy?: SharedByUser;
   attachmentCount?: number;
   imagePreviewIds?: string[];
+  // Absent means "not loaded"; null means "this user has no reminder".
+  reminder?: TransformedReminder | null;
 }
 
 // Input type for notes from Prisma with includes
@@ -34,13 +47,20 @@ interface NoteWithIncludes {
   id: string;
   title: string;
   content: string | null;
-  isPinned: boolean;
+  version: number;
   isArchived: boolean;
   background: string | null;
   state: string;
   createdAt: Date;
   updatedAt: Date;
+  stateChangedAt?: Date;
   userId: string;
+  pins?: Array<{ userId: string }>;
+  reminders?: Array<{
+    remindAt: string;
+    recurrence: ReminderRecurrence;
+    version: number;
+  }>;
   tags?: Array<{ id: string; userId: string }>;
   sharedWith?: Array<{
     id: string;
@@ -63,10 +83,20 @@ export function transformNote(
   note: NoteWithIncludes,
   userId: string,
 ): TransformedNote {
-  const { tags, sharedWith, _count, attachments, ...rest } = note;
+  const {
+    tags,
+    sharedWith,
+    _count,
+    attachments,
+    pins,
+    reminders,
+    stateChangedAt,
+    ...rest
+  } = note;
 
   // Determine if user is owner or shared user
   const isOwner = note.userId === userId;
+  const isPinned = (pins?.length ?? 0) > 0;
 
   // Filter tags to only include those owned by the requesting user
   const filteredTags = tags?.filter((t) => t.userId === userId) || [];
@@ -87,6 +117,7 @@ export function transformNote(
 
   const transformed: TransformedNote = {
     ...rest,
+    isPinned,
     tagIds: filteredTags.map((t) => t.id),
     createdAt: toISOString(rest.createdAt),
     updatedAt: toISOString(rest.updatedAt),
@@ -103,6 +134,10 @@ export function transformNote(
   // Add sharedBy for shared notes
   if (sharedBy) {
     transformed.sharedBy = sharedBy;
+  }
+
+  if (reminders) {
+    transformed.reminder = reminders[0] ?? null;
   }
 
   return transformed;

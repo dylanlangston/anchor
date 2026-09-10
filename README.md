@@ -6,33 +6,36 @@
 
 **An offline first, self hostable note taking application**
 
-[![Version](https://img.shields.io/github/v/release/zhfahim/anchor?label=version)](https://github.com/zhfahim/anchor/releases)
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
-[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?logo=docker)](https://github.com/zhfahim/anchor)
-[![Discord](https://img.shields.io/discord/1487830114795257906?label=Discord)](https://discord.gg/KbyUEvTTQ)
+[![Version](https://img.shields.io/github/v/release/zhfahim/anchor?label=version&style=for-the-badge)](https://github.com/zhfahim/anchor/releases)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg?style=for-the-badge)](LICENSE)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?style=for-the-badge&logo=docker)](https://github.com/zhfahim/anchor)
+[![Discord](https://img.shields.io/discord/1487830114795257906?label=Discord&style=for-the-badge)](https://discord.gg/sAfqjy8EYK)
 
+<a href="https://trendshift.io/repositories/18646" target="_blank"><img src="https://trendshift.io/api/badge/repositories/18646" alt="ZhFahim%2Fanchor | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 
 Anchor focuses on speed, privacy, simplicity, and reliability across mobile and web. Notes are stored locally, editable offline, and synced across devices when online.
 
 </div>
-
 
 ## Features
 
 - **Rich Text Editor** - Create and edit notes with powerful formatting (bold, italic, underline, headings, lists, checkboxes)
 - **Offline First** - All edits work offline with local database
 - **Note Sharing** - Share notes with other users (viewer or editor)
+- **Note History** - Read earlier versions of a note and put one back
 - **Tags System** - Organize notes with custom tags and colors
 - **Attachments** - Attach images and audio to notes
 - **Note Backgrounds** - Customize notes with solid colors and patterns
 - **Pin Notes** - Pin important notes for quick access
 - **Archive Notes** - Archive notes for later reference
+- **Reminders** - Set a time on any note and get a notification on your phone, once or repeating
 - **Search** - Search notes locally by title or content
 - **Trash** - Soft delete notes with recovery period
 - **Automatic Sync** - Sync changes across devices when online
+- **Import & Export** - Back up your full library, or move notes in and out as plain Markdown
+- **Home Screen Widget** - Quick access to your notes from the Android home screen
 - **Admin Panel** - User management, registration control, and system statistics
 - **OIDC Authentication** - Sign in with OpenID Connect providers (Pocket ID, Authelia, Keycloak, etc.)
-
 
 ## Screenshots
 
@@ -50,12 +53,12 @@ Anchor focuses on speed, privacy, simplicity, and reliability across mobile and 
   <img src="https://raw.githubusercontent.com/zhfahim/anchor/main/.github/assets/screenshot-mobile-dark.jpg" alt="Mobile Dark Mode" width="20%">
 </div>
 
-
 ## Self Hosting With Docker
 
 ### Option 1: Using Pre-built Image (Recommended)
 
 1. **Create a `docker-compose.yml` file:**
+
    ```yaml
    services:
      anchor:
@@ -78,7 +81,9 @@ Anchor focuses on speed, privacy, simplicity, and reliability across mobile and 
    | Variable | Required | Default | Description |
    |----------|----------|---------|-------------|
    | `APP_URL` | No | `http://localhost:3000` | Base URL where Anchor is served |
-   | `JWT_SECRET` | No | (auto-generated) | Auth token secret |
+   | `JWT_SECRET` | No | (auto-generated) | Auth token secret. Min 16 characters when set |
+   | `DATA_DIR` | No | `/data` | Root directory for persisted uploads |
+   | `CORS_ORIGINS` | No | (allow all) | Comma-separated allowlist of CORS origins |
    | `PG_HOST` | No | (empty) | External Postgres host (leave empty for embedded) |
    | `PG_PORT` | No | `5432` | Postgres port |
    | `PG_USER` | No | `anchor` | Postgres username |
@@ -93,6 +98,7 @@ Anchor focuses on speed, privacy, simplicity, and reliability across mobile and 
    | `DISABLE_INTERNAL_AUTH` | No | `false` | Hide local login form when OIDC is enabled (OIDC-only mode) |
 
 3. **Start the container:**
+
    ```bash
    docker compose up -d
    ```
@@ -121,24 +127,24 @@ volumes:
 
 > **Warning:** The `next` image is built from the `next` branch and may contain incomplete features or breaking changes. Do not use it in production. Back up your data before switching.
 
-
 ### Option 2: Building from Source
 
 If you want to build from source or customize the image:
 
 1. **Clone the project:**
+
    ```bash
    git clone https://github.com/zhfahim/anchor.git
    cd anchor
    ```
 
 2. **Start the container:**
+
    ```bash
    docker compose up -d
    ```
 
    The `docker-compose.yml` file will build the image from source automatically.
-
 
 ## Mobile App
 
@@ -151,7 +157,6 @@ Download the Android mobile app.
    Multiple APK files are available:
    - **Universal APK** (`anchor-{version}.apk`) - Recommended for most users, works on all devices
    - **Architecture-specific APKs** - Smaller file sizes for specific CPU architectures
-
 
 ## OIDC Authentication
 
@@ -185,6 +190,7 @@ When configuring your OIDC provider for web login, add this callback/redirect UR
 ```
 
 For example, if your Anchor instance is at `https://notes.example.com`, the callback URL would be:
+
 ```
 https://notes.example.com/api/auth/oidc/callback
 ```
@@ -202,7 +208,7 @@ services:
       - OIDC_PROVIDER_NAME=Pocket ID
       - OIDC_ISSUER_URL=https://pocketid.example.com
       - OIDC_CLIENT_ID=your-client-id
-      - OIDC_CLIENT_SECRET=your-client-secret  # Optional for public clients
+      - OIDC_CLIENT_SECRET=your-client-secret # Optional for public clients
       - DISABLE_INTERNAL_AUTH=false
       - APP_URL=https://notes.example.com
 ```
@@ -211,21 +217,31 @@ services:
 
 Alternatively, configure OIDC via the admin panel (Settings → OIDC Authentication) when the three env vars are not all set.
 
+## Troubleshooting & Collecting Logs
+
+Anchor never collects any data. When you need to report a bug, you can collect logs yourself and share them with the maintainer.
+
+**Mobile app**
+
+1. Reproduce the issue.
+2. Open Settings → View Logs.
+3. Tap the **Export** button at the bottom, then share the saved `.log` file in your bug report.
+
+> Sensitive values are stripped before anything is written to the log file. This includes authorization headers, passwords, tokens, refresh tokens, secrets, and email addresses, which are always replaced with `***`.
+
+Logs are stored locally on the device only (rolling, ~2 MB max).
 
 ## Roadmap
 
 Future planned features:
 
-- Reminders and notifications
 - Real-time collaboration
-
 
 ## Tech Stack
 
 - **Backend**: Nest.js, PostgreSQL, Prisma
 - **Mobile**: Flutter
 - **Web**: Next.js, TypeScript
-
 
 ## Contributing
 
@@ -235,22 +251,33 @@ Future planned features:
    git checkout -b feature/your-feature
    ```
 3. Make your changes
-4. Ensure builds pass:
-   - Web: `cd web && pnpm build`
-   - Server: `cd server && pnpm build`
+4. Ensure builds pass and code is linted:
+   - Web: `cd web && pnpm build && pnpm check`
+   - Server: `cd server && pnpm build && pnpm check`
 5. Commit changes:
    ```bash
    git commit -m "Describe your change"
    ```
 6. Push and create a Pull Request
 
+### Code style
+
+Linting and formatting are enforced in CI and by a pre-commit hook
+(`.githooks/pre-commit`) that checks staged files.
+Running `pnpm install` in either `web` or `server`
+enables the hook automatically (via the `prepare` script). To enable it manually:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Before committing, fix issues with `pnpm check:fix` in the relevant project.
 
 ## Support
 
 If you find Anchor useful, consider supporting its development:
 
 [<img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" height="60">](https://www.buymeacoffee.com/zahid)
-
 
 ## License
 

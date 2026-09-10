@@ -50,17 +50,19 @@ export class TokenResolverService {
         where: { id: payload.sub },
         select: AUTH_USER_SELECT,
       });
-      return user as AuthUser | null;
+      return user;
     } catch {
       return null;
     }
   }
 
-  private async resolveUserFromApiToken(token: string): Promise<AuthUser | null> {
+  private async resolveUserFromApiToken(
+    token: string,
+  ): Promise<AuthUser | null> {
     const user = await this.prisma.user.findUnique({
       where: { apiToken: token },
       select: AUTH_USER_SELECT,
     });
-    return user as AuthUser | null;
+    return user;
   }
 }

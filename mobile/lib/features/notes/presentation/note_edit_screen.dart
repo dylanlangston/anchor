@@ -1,26 +1,38 @@
 import 'dart:async';
-import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
-import 'package:lucide_icons/lucide_icons.dart';
-import 'package:uuid/uuid.dart';
-import 'package:cached_network_image/cached_network_image.dart';
-import 'package:anchor/features/notes/domain/note.dart';
-import 'package:anchor/core/widgets/confirm_dialog.dart';
-import 'package:anchor/core/widgets/app_snackbar.dart';
-import 'package:anchor/core/widgets/rich_text_editor.dart';
-import 'package:anchor/features/settings/presentation/controllers/editor_preferences_controller.dart';
+
+import 'package:anchor/core/logging/app_logger.dart';
 import 'package:anchor/core/network/server_config_provider.dart';
-import 'package:anchor/features/tags/presentation/widgets/tag_selector.dart';
-import 'package:anchor/features/notes/presentation/widgets/note_background.dart';
-import 'package:anchor/features/notes/presentation/widgets/note_background_picker.dart';
-import 'package:anchor/features/notes/presentation/widgets/share_note_sheet.dart';
+import 'package:anchor/core/providers/active_user_id_provider.dart';
+import 'package:anchor/core/router/app_routes.dart';
+import 'package:anchor/core/widgets/app_snackbar.dart';
+import 'package:anchor/core/widgets/confirm_dialog.dart';
+import 'package:anchor/core/widgets/rich_text_editor.dart';
+import 'package:anchor/features/notes/data/repository/note_attachments_repository.dart';
+import 'package:anchor/features/notes/domain/note.dart';
 import 'package:anchor/features/notes/presentation/widgets/note_attachments_gallery.dart';
 import 'package:anchor/features/notes/presentation/widgets/note_audio_recorder_sheet.dart';
+import 'package:anchor/features/notes/presentation/widgets/note_background.dart';
+import 'package:anchor/features/notes/presentation/widgets/note_background_picker.dart';
 import 'package:anchor/features/notes/presentation/widgets/note_options_sheet.dart';
-import 'package:anchor/features/notes/data/repository/note_attachments_repository.dart';
-import 'package:anchor/core/providers/active_user_id_provider.dart';
+import 'package:anchor/features/notes/presentation/widgets/share_note_sheet.dart';
+import 'package:anchor/features/settings/presentation/controllers/editor_preferences_controller.dart';
+import 'package:anchor/features/tags/presentation/widgets/tag_selector.dart';
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:uuid/uuid.dart';
+
 import '../data/repository/notes_repository.dart';
+import 'package:anchor/core/notifications/reminder_permission_prompt.dart';
+import 'widgets/reminder_chip.dart';
+import 'widgets/reminder_picker_sheet.dart';
+import 'package:anchor/core/theme/context_extensions.dart';
+import 'package:anchor/core/theme/tokens/app_icon_sizes.dart';
+import 'package:anchor/core/theme/tokens/app_radius.dart';
+import 'package:anchor/core/widgets/app_bottom_sheet.dart';
 
 class NoteEditScreen extends ConsumerStatefulWidget {
   final String? noteId;
@@ -40,6 +52,8 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
   bool _isDeleted = false;
   bool _isLoaded = false;
   bool _isEditing = false;
+  bool _allowPop = false;
+  bool _isHandlingPop = false;
   bool _isPinned = false;
   bool _isArchived = false;
   Note? _existingNote;
@@ -53,59 +67,50 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
     return !isActive || _existingNote?.permission == NotePermission.viewer;
   }
 
-  // Auto-save state
   Timer? _autoSaveTimer;
+  StreamSubscription<Note?>? _noteWatch;
   bool _hasUnsavedChanges = false;
-  String? _lastSavedTitle;
-  String? _lastSavedContent;
-  Set<String>? _lastSavedTagIds;
-  String? _lastSavedBackground;
-  bool? _lastSavedPinned;
+  bool _isSaving = false;
+  String _lastTitleText = '';
+
+  String get _editorContent =>
+      _editorKey.currentState?.getContent() ?? _initialContent ?? '';
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
 
+    final watchedId = widget.note?.id ?? widget.noteId;
+    if (watchedId != null) {
+      _watchNote(watchedId);
+    }
+
     if (widget.note != null) {
-      // Note passed directly
       _isNew = false;
       _existingNote = widget.note;
       _isPinned = widget.note!.isPinned;
       _isArchived = widget.note!.isArchived;
+      _lastTitleText = widget.note!.title;
       _titleController.text = widget.note!.title;
       _initialContent = widget.note!.content;
       _selectedTagIds = List.from(widget.note!.tagIds);
       _selectedBackground = widget.note!.background;
       _isLoaded = true;
-      // Non-active notes or viewer notes are read-only
       if (!widget.note!.isActive || !widget.note!.canEdit) {
         _isEditing = false;
       }
-      // Initialize last saved state
-      _initializeLastSavedState(widget.note!);
     } else if (widget.noteId != null) {
-      // Fallback: fetch from repository if only ID is provided
       _isNew = false;
       _loadNote();
     } else {
-      // New notes start in edit mode
       _isEditing = true;
       _isPinned = false;
       _isLoaded = true;
     }
 
-    // Listen to title and content changes for auto-save
     _titleFocusNode.addListener(_updateEditingState);
-    _titleController.addListener(_onContentChanged);
-  }
-
-  void _initializeLastSavedState(Note note) {
-    _lastSavedTitle = note.title;
-    _lastSavedContent = note.content;
-    _lastSavedTagIds = note.tagIds.toSet();
-    _lastSavedBackground = note.background;
-    _lastSavedPinned = note.isPinned;
+    _titleController.addListener(_onTitleChanged);
   }
 
   void _updateEditingState() {
@@ -122,11 +127,70 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
     }
   }
 
+  void _watchNote(String id) {
+    _noteWatch?.cancel();
+    _noteWatch = ref
+        .read(notesRepositoryProvider)
+        .watchNote(id)
+        .listen(_onStoredNoteChanged);
+  }
+
+  /// The stored note changed under us. It replaces what is on screen unless
+  /// there is an unsaved edit, which stays and goes up on the next save.
+  void _onStoredNoteChanged(Note? note) {
+    if (!mounted) return;
+
+    if (note == null) {
+      _handleNoteGone();
+      return;
+    }
+
+    final adopt = !_hasUnsavedChanges && !_isSaving && !_matchesEditor(note);
+
+    setState(() {
+      _existingNote = note;
+      _isLoaded = true;
+      if (!adopt) return;
+
+      if (_titleController.text != note.title) {
+        _lastTitleText = note.title;
+        _titleController.text = note.title;
+      }
+      _initialContent = note.content;
+      _isPinned = note.isPinned;
+      _isArchived = note.isArchived;
+      _selectedTagIds = List.from(note.tagIds);
+      _selectedBackground = note.background;
+      if (!note.isActive || !note.canEdit) {
+        _isEditing = false;
+      }
+    });
+  }
+
+  bool _matchesEditor(Note note) =>
+      note.title == _titleController.text.trim() &&
+      (note.content ?? '') == _editorContent &&
+      note.isPinned == _isPinned &&
+      note.isArchived == _isArchived &&
+      note.background == _selectedBackground &&
+      _listEquals(note.tagIds, _selectedTagIds);
+
+  /// Deleted for good elsewhere, or a share that was revoked.
+  void _handleNoteGone() {
+    if (_isNew || _isDeleted) return;
+
+    _isDeleted = true;
+    _autoSaveTimer?.cancel();
+    AppSnackbar.showError(context, message: 'This note is no longer available');
+    _popOrExit();
+  }
+
   Future<void> _loadNote() async {
     final note = await ref
         .read(notesRepositoryProvider)
         .getNote(widget.noteId!);
     if (note != null && mounted) {
+      _lastTitleText = note.title;
       setState(() {
         _existingNote = note;
         _isPinned = note.isPinned;
@@ -136,57 +200,24 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
         _selectedTagIds = List.from(note.tagIds);
         _selectedBackground = note.background;
         _isLoaded = true;
-        // Non-active notes or viewer notes are read-only
         if (!note.isActive || !note.canEdit) {
           _isEditing = false;
         }
       });
-      _initializeLastSavedState(note);
     }
+  }
+
+  /// The title controller also notifies on selection changes; only text
+  /// changes mark the note dirty.
+  void _onTitleChanged() {
+    if (_titleController.text == _lastTitleText) return;
+    _lastTitleText = _titleController.text;
+    _onContentChanged();
   }
 
   void _onContentChanged() {
-    final hasChanges = _checkForChanges();
-
-    if (hasChanges != _hasUnsavedChanges) {
-      setState(() {
-        _hasUnsavedChanges = hasChanges;
-      });
-    }
-
-    if (hasChanges) {
-      _resetAutoSaveTimer();
-    }
-  }
-
-  bool _checkForChanges() {
-    final currentTitle = _titleController.text.trim();
-    final editorState = _editorKey.currentState;
-    final currentContent = editorState?.getContent() ?? '';
-    final currentTagIds = _selectedTagIds.toSet();
-
-    // For new notes, check if anything is non-empty
-    if (_isNew) {
-      final plainText = editorState?.getPlainText() ?? '';
-      return currentTitle.isNotEmpty ||
-          plainText.isNotEmpty ||
-          _isPinned ||
-          _selectedBackground != null ||
-          currentTagIds.isNotEmpty;
-    }
-
-    // For existing notes, compare with last saved state
-    // Normalize empty title to 'Untitled' for comparison
-    final normalizedCurrentTitle = currentTitle.isNotEmpty
-        ? currentTitle
-        : 'Untitled';
-    final normalizedLastSavedTitle = _lastSavedTitle ?? 'Untitled';
-
-    return normalizedCurrentTitle != normalizedLastSavedTitle ||
-        currentContent != (_lastSavedContent ?? '') ||
-        !_setEquals(currentTagIds, _lastSavedTagIds ?? {}) ||
-        _selectedBackground != _lastSavedBackground ||
-        _isPinned != (_lastSavedPinned ?? false);
+    _hasUnsavedChanges = true;
+    _resetAutoSaveTimer();
   }
 
   bool _setEquals(Set<String> a, Set<String> b) {
@@ -204,21 +235,48 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
   Future<void> _autoSave() async {
     if (!_hasUnsavedChanges) return;
 
-    await _saveNote();
+    await _savePendingChanges();
+  }
 
-    // Update last saved state (track actual saved title, which is 'Untitled' if empty)
-    final title = _titleController.text.trim();
-    _lastSavedTitle = title.isNotEmpty ? title : 'Untitled';
-    final editorState = _editorKey.currentState;
-    _lastSavedContent = editorState?.getContent() ?? '';
-    _lastSavedTagIds = _selectedTagIds.toSet();
-    _lastSavedBackground = _selectedBackground;
-    _lastSavedPinned = _isPinned;
+  Future<void> _savePendingChanges() async {
+    // Cleared before saving so edits made during the await stay flagged.
+    _hasUnsavedChanges = false;
+    _isSaving = true;
+    try {
+      await _saveNote();
+    } finally {
+      _isSaving = false;
+    }
+  }
 
-    if (mounted) {
-      setState(() {
-        _hasUnsavedChanges = false;
-      });
+  /// Leaves the editor: pops when there is a screen beneath, or exits the
+  /// app when the editor is the root (opened from the home widget).
+  void _popOrExit([Object? result]) {
+    if (context.canPop()) {
+      context.pop(result);
+    } else {
+      SystemNavigator.pop();
+    }
+  }
+
+  Future<void> _saveAndPop([Object? result]) async {
+    if (_isHandlingPop) return;
+
+    _isHandlingPop = true;
+    _autoSaveTimer?.cancel();
+
+    try {
+      // _saveNote skips when no field changed.
+      if (!_isDeleted) {
+        await _savePendingChanges();
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _allowPop = true;
+        });
+        _popOrExit(result);
+      }
     }
   }
 
@@ -226,7 +284,6 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
 
-    // Save when app goes to background or is paused
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
       if (_hasUnsavedChanges) {
@@ -236,14 +293,13 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
   }
 
   Future<void> _togglePinned() async {
-    // Don't allow pinning if note is not active
     if (_existingNote?.isActive != true) {
       return;
     }
     setState(() {
       _isPinned = !_isPinned;
     });
-    _onContentChanged(); // Trigger change detection and auto-save
+    _onContentChanged();
   }
 
   Future<void> _toggleArchived() async {
@@ -275,27 +331,23 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
         await repository.archiveNote(widget.noteId!);
       }
 
-      // Reload note to get updated state
       await _loadNote();
 
-      // Show success snackbar
       if (mounted) {
         AppSnackbar.showSuccess(
           context,
           message: wasArchived ? 'Note unarchived' : 'Note archived',
         );
 
-        // If archiving, go back after showing snackbar
         if (!wasArchived) {
           // Small delay to ensure snackbar is visible
           await Future.delayed(const Duration(milliseconds: 300));
           if (mounted) {
-            context.pop();
+            _popOrExit();
           }
         }
       }
     } catch (e) {
-      // Show error snackbar
       if (mounted) {
         AppSnackbar.showError(
           context,
@@ -308,58 +360,92 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
   }
 
   void _showColorPicker() {
-    // Don't allow changing background if note is not active
-    if (_existingNote?.isActive != true) {
+    // New notes have no _existingNote yet but are always editable.
+    if (!_isNew && _existingNote?.isActive != true) {
       return;
     }
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
+    AppBottomSheet.show(
+      context,
       builder: (context) => NoteBackgroundPicker(
         selectedColor: _selectedBackground,
         onColorChanged: (color) {
           setState(() {
             _selectedBackground = color;
           });
-          _onContentChanged(); // Trigger change detection and auto-save
+          _onContentChanged();
         },
       ),
     );
   }
 
   void _showShareSheet() {
-    // Only allow sharing for existing, active notes, and owners only
     if (_isNew ||
         _existingNote?.isActive != true ||
         !(_existingNote?.isOwner ?? true)) {
       return;
     }
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
+    AppBottomSheet.show(
+      context,
       builder: (context) =>
           ShareNoteSheet(noteId: widget.noteId ?? _existingNote!.id),
     ).then((_) {
-      // Reload note to update share count after sheet closes
       if (widget.noteId != null || _existingNote != null) {
-        _reloadNoteShareInfo();
+        _reloadNote();
       }
     });
   }
 
-  void _showAttachmentSheet() {
-    final noteId = widget.noteId ?? _existingNote?.id;
-    if (noteId == null) return;
+  void _showReminderPicker() {
+    if (_isReadOnly) return;
+    AppBottomSheet.show(
+      context,
+      // The sheet pops before this runs, so the snackbar needs the screen's
+      // context.
+      builder: (_) => ReminderPickerSheet(
+        reminder: _existingNote?.reminder,
+        onReminderChanged: (reminder) async {
+          try {
+            var noteId = widget.noteId ?? _existingNote?.id;
+            noteId ??= await _createNote();
 
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
+            await ref
+                .read(notesRepositoryProvider)
+                .setReminder(noteId, reminder);
+            await _reloadNote();
+            if (!mounted) return;
+            AppSnackbar.showSuccess(
+              context,
+              message: reminder == null ? 'Reminder removed' : 'Reminder set',
+            );
+          } catch (_) {
+            if (!mounted) return;
+            AppSnackbar.showError(context, message: 'Failed to set reminder');
+            return;
+          }
+
+          if (reminder != null && mounted) {
+            await ensureReminderPermissions(
+              context,
+              ref,
+              trigger: ReminderPermissionTrigger.userSet,
+            );
+          }
+        },
+      ),
+    );
+  }
+
+  void _showAttachmentSheet() {
+    AppBottomSheet.show(
+      context,
       builder: (context) => NoteAttachmentSheet(
         onFileSelected: (filePath, mimeType, filename) async {
           try {
+            // Attachments are keyed to a persisted note. For a brand-new note
+            // the user may start by adding an attachment, so create the note
+            // now that there's something to attach to.
+            var noteId = widget.noteId ?? _existingNote?.id;
+            noteId ??= await _createNote();
             final repo = ref.read(noteAttachmentsRepositoryProvider);
             await repo.addAttachment(noteId, filePath, mimeType, filename);
             if (!context.mounted) return;
@@ -373,25 +459,51 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
     );
   }
 
+  void _showTagPicker() {
+    if (_isReadOnly) return;
+    AppBottomSheet.show(
+      context,
+      builder: (context) => TagPickerSheet(
+        selectedTagIds: _selectedTagIds,
+        onTagsChanged: (tagIds) {
+          setState(() => _selectedTagIds = List.from(tagIds));
+          _onContentChanged();
+        },
+      ),
+    );
+  }
+
   void _showOptionsSheet() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
+    AppBottomSheet.show(
+      context,
       builder: (context) => NoteOptionsSheet(
         isReadOnly: _isReadOnly,
         isNew: _isNew,
         isOwner: _existingNote?.isOwner ?? true,
         isArchived: _isArchived,
+        onTagsTap: _showTagPicker,
         onBackgroundTap: _showColorPicker,
+        onReminderTap: _showReminderPicker,
         onAttachmentTap: _showAttachmentSheet,
         onArchiveTap: _toggleArchived,
         onDeleteTap: _deleteNote,
+        onHistoryTap: !_isNew && !_isReadOnly ? _openHistory : null,
       ),
     );
   }
 
-  Future<void> _reloadNoteShareInfo() async {
+  /// Sends what is typed so far before showing the versions.
+  Future<void> _openHistory() async {
+    final noteId = widget.noteId ?? _existingNote?.id;
+    if (noteId == null) return;
+
+    _autoSaveTimer?.cancel();
+    await _savePendingChanges();
+    if (!mounted) return;
+    context.push('/note/$noteId/${AppRoutes.noteHistory}');
+  }
+
+  Future<void> _reloadNote() async {
     final noteId = widget.noteId ?? _existingNote?.id;
     if (noteId == null) return;
 
@@ -407,15 +519,45 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _autoSaveTimer?.cancel();
-    _titleController.removeListener(_onContentChanged);
+    unawaited(_noteWatch?.cancel());
+    _titleController.removeListener(_onTitleChanged);
     _titleController.dispose();
     _titleFocusNode.removeListener(_updateEditingState);
     _titleFocusNode.dispose();
     super.dispose();
   }
 
+  /// Creates and persists a note from the current editor fields, flipping the
+  /// screen out of "new" mode. Returns the created note's id.
+  Future<String> _createNote() async {
+    final title = _titleController.text.trim();
+    final content = _editorKey.currentState?.getContent() ?? '';
+    final newNote = Note(
+      id: const Uuid().v4(),
+      title: title,
+      content: content,
+      isPinned: _isPinned,
+      tagIds: _selectedTagIds,
+      background: _selectedBackground,
+      isSynced: false,
+    );
+    AppLogger.instance.info(
+      'NoteEdit',
+      '_createNote: id=${newNote.id} title.len=${newNote.title.length} '
+          'content.len=${content.length} tags=${_selectedTagIds.length}',
+    );
+    await ref.read(notesRepositoryProvider).createNote(newNote);
+    if (mounted) {
+      setState(() {
+        _isNew = false;
+        _existingNote = newNote;
+      });
+      _watchNote(newNote.id);
+    }
+    return newNote.id;
+  }
+
   Future<void> _saveNote() async {
-    // Don't save if note is not active or user can't edit.
     // New notes (_existingNote == null) are always treated as active/editable.
     final isActive =
         _existingNote == null || (_existingNote?.isActive ?? false);
@@ -428,55 +570,57 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
     final content = editorState?.getContent() ?? '';
     final plainText = editorState?.getPlainText() ?? '';
 
-    if (title.isEmpty &&
+    // A note that was never created is only worth persisting once it holds
+    // something.
+    if (_isNew &&
+        title.isEmpty &&
         plainText.isEmpty &&
         _selectedBackground == null &&
         !_isPinned) {
+      AppLogger.instance.debug(
+        'NoteEdit',
+        '_saveNote: skipping empty new note',
+      );
       return;
     }
 
     final repository = ref.read(notesRepositoryProvider);
 
     if (_isNew) {
-      final newNote = Note(
-        id: const Uuid().v4(),
-        title: title.isNotEmpty ? title : 'Untitled',
-        content: content,
-        isPinned: _isPinned,
-        tagIds: _selectedTagIds,
-        background: _selectedBackground,
-        updatedAt: DateTime.now(),
-        isSynced: false,
-      );
-      await repository.createNote(newNote);
-      if (mounted) {
-        setState(() {
-          _isNew = false;
-          _existingNote = newNote;
-        });
-      }
+      await _createNote();
     } else if (_existingNote != null) {
-      // Ensure empty titles become 'Untitled'
-      final actualTitle = title.isNotEmpty ? title : 'Untitled';
-
-      // Check if anything changed
       final tagsChanged = !_listEquals(_existingNote!.tagIds, _selectedTagIds);
-      if (_existingNote!.title == actualTitle &&
-          _existingNote!.content == content &&
-          _existingNote!.isPinned == _isPinned &&
-          _existingNote!.background == _selectedBackground &&
+      final titleChanged = _existingNote!.title != title;
+      final contentChanged = _existingNote!.content != content;
+      final pinChanged = _existingNote!.isPinned != _isPinned;
+      final bgChanged = _existingNote!.background != _selectedBackground;
+      if (!titleChanged &&
+          !contentChanged &&
+          !pinChanged &&
+          !bgChanged &&
           !tagsChanged) {
+        AppLogger.instance.debug(
+          'NoteEdit',
+          '_saveNote: no field changed for id=${_existingNote!.id}, skipping',
+        );
         return;
       }
 
+      AppLogger.instance.info(
+        'NoteEdit',
+        '_saveNote update: id=${_existingNote!.id} '
+            'title=$titleChanged content=$contentChanged '
+            '(${_existingNote!.content?.length ?? 0}→${content.length}) '
+            'pin=$pinChanged bg=$bgChanged tags=$tagsChanged',
+      );
+
       final updatedNote = _existingNote!.copyWith(
-        title: actualTitle,
+        title: title,
         content: content,
         isPinned: _isPinned,
         isArchived: _isArchived,
         tagIds: _selectedTagIds,
         background: _selectedBackground,
-        updatedAt: DateTime.now(),
         isSynced: false,
       );
       await repository.updateNote(updatedNote);
@@ -493,7 +637,7 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
 
   Future<void> _deleteNote() async {
     if (_isNew) {
-      context.pop();
+      _popOrExit();
       return;
     }
 
@@ -519,7 +663,7 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
 
         if (mounted) {
           AppSnackbar.showSuccess(context, message: 'Note moved to trash');
-          context.pop();
+          _popOrExit();
         }
       } catch (e) {
         if (mounted) {
@@ -550,7 +694,6 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
     try {
       await ref.read(notesRepositoryProvider).restoreNote(widget.noteId!);
 
-      // Reload note to get updated state
       await _loadNote();
 
       if (mounted) {
@@ -588,7 +731,7 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
 
         if (mounted) {
           AppSnackbar.showSuccess(context, message: 'Note permanently deleted');
-          context.pop();
+          _popOrExit();
         }
       } catch (e) {
         if (mounted) {
@@ -600,14 +743,15 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
 
   Widget _buildSharedByBadge(ThemeData theme, String? serverUrl) {
     final sharedBy = _existingNote!.sharedBy!;
+    final dims = context.dims;
     return Padding(
-      padding: const EdgeInsets.only(right: 8),
+      padding: EdgeInsets.only(right: dims.xs),
       child: Center(
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          padding: EdgeInsets.symmetric(horizontal: dims.xs, vertical: 6),
           decoration: BoxDecoration(
             color: theme.colorScheme.secondaryContainer,
-            borderRadius: BorderRadius.circular(20),
+            borderRadius: AppRadius.lgBorder,
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
@@ -700,18 +844,22 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
   }
 
   Widget _buildReadOnlyBanner(ThemeData theme, bool isTrashed) {
+    final dims = context.dims;
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+      padding: EdgeInsets.symmetric(
+        horizontal: dims.editorPadding.left,
+        vertical: dims.sm,
+      ),
       color: theme.colorScheme.surfaceContainerHighest,
       child: Row(
         children: [
           Icon(
             LucideIcons.lock,
-            size: 16,
+            size: AppIconSizes.sm,
             color: theme.colorScheme.onSurfaceVariant,
           ),
-          const SizedBox(width: 8),
+          SizedBox(width: dims.xs),
           Expanded(
             child: Text(
               isTrashed
@@ -729,11 +877,21 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
 
   Widget _buildEditorHeader(ThemeData theme) {
     final isReadOnly = _isReadOnly;
+    final dims = context.dims;
+    final showTags = (_isEditing && !isReadOnly) || _selectedTagIds.isNotEmpty;
+    final showAttachments =
+        !_isNew && (_existingNote != null || widget.noteId != null);
+    final reminder = _existingNote?.reminder;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24),
+          padding: EdgeInsets.only(
+            left: dims.editorPadding.left,
+            right: dims.editorPadding.right,
+            top: dims.xs,
+          ),
           child: GestureDetector(
             onTap: !isReadOnly
                 ? () {
@@ -746,17 +904,26 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
               controller: _titleController,
               focusNode: _titleFocusNode,
               readOnly: isReadOnly,
-              style: theme.textTheme.displaySmall?.copyWith(
+              style: theme.textTheme.headlineSmall?.copyWith(
+                fontSize: 28,
                 fontWeight: FontWeight.bold,
                 color: theme.colorScheme.onSurface,
               ),
               decoration: InputDecoration(
-                hintText: _isEditing && !isReadOnly ? 'Title' : null,
-                hintStyle: TextStyle(
-                  color: theme.colorScheme.onSurface.withValues(alpha: 0.3),
-                ),
+                hintText: isReadOnly ? 'Untitled' : 'Title',
+                hintStyle: isReadOnly
+                    ? theme.textTheme.headlineSmall?.copyWith(
+                        fontSize: 28,
+                        fontWeight: FontWeight.bold,
+                        color: theme.colorScheme.onSurface,
+                      )
+                    : TextStyle(
+                        color: theme.colorScheme.onSurface.withValues(
+                          alpha: 0.3,
+                        ),
+                      ),
                 border: InputBorder.none,
-                contentPadding: const EdgeInsets.symmetric(vertical: 16),
+                contentPadding: EdgeInsets.zero,
                 filled: false,
               ),
               textCapitalization: TextCapitalization.sentences,
@@ -764,7 +931,7 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
             ),
           ),
         ),
-        if ((_isEditing && !isReadOnly) || _selectedTagIds.isNotEmpty)
+        if (showTags)
           TagSelector(
             selectedTagIds: _selectedTagIds,
             readOnly: !_isEditing || isReadOnly,
@@ -775,7 +942,22 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
               }
             },
           ),
-        if (!_isNew && (_existingNote != null || widget.noteId != null))
+        if (reminder != null)
+          Padding(
+            padding: EdgeInsets.only(
+              left: dims.editorPadding.left,
+              right: dims.editorPadding.right,
+              top: dims.xs,
+            ),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: ReminderChip(
+                reminder: reminder,
+                onTap: isReadOnly ? null : _showReminderPicker,
+              ),
+            ),
+          ),
+        if (showAttachments)
           NoteAttachmentsGallery(
             noteId: widget.noteId ?? _existingNote!.id,
             isOwner: _existingNote?.isOwner ?? false,
@@ -796,13 +978,10 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
     final isTrashed = _existingNote?.isTrashed ?? false;
 
     return PopScope(
+      canPop: _allowPop,
       onPopInvokedWithResult: (didPop, result) async {
-        if (didPop && !_isDeleted) {
-          _autoSaveTimer?.cancel();
-          if (_hasUnsavedChanges || _isEditing) {
-            await _saveNote();
-          }
-        }
+        if (didPop) return;
+        await _saveAndPop(result);
       },
       child: NoteBackground(
         styleId: _selectedBackground,
@@ -813,7 +992,7 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
             backgroundColor: Colors.transparent,
             leading: IconButton(
               icon: const Icon(LucideIcons.chevronLeft),
-              onPressed: () => context.pop(),
+              onPressed: _saveAndPop,
             ),
             actions: [
               if (isTrashed) ...[
@@ -839,7 +1018,7 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
                     onPressed: _showOptionsSheet,
                   ),
               ],
-              const SizedBox(width: 8),
+              SizedBox(width: context.dims.xs),
             ],
           ),
           body: Hero(
@@ -855,17 +1034,14 @@ class _NoteEditScreenState extends ConsumerState<NoteEditScreen>
                             key: _editorKey,
                             initialContent: _initialContent,
                             hintText: 'Start typing...',
-                            showToolbar: _isEditing && !isReadOnly,
+                            showToolbar: !isReadOnly,
                             canEdit: !isReadOnly,
                             onEditingChanged: (_) => _updateEditingState(),
-                            onChanged: (_) => _onContentChanged(),
+                            onChanged: _onContentChanged,
                             sortChecklistItems: ref
                                 .watch(editorPreferencesControllerProvider)
                                 .sortChecklistItems,
-                            contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 24,
-                              vertical: 16,
-                            ),
+                            contentPadding: context.dims.editorPadding,
                             header: _buildEditorHeader(theme),
                           )
                         : const Center(child: CircularProgressIndicator()),

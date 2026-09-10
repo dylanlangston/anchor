@@ -1,18 +1,28 @@
 import {
+  Inject,
   Injectable,
   NotFoundException,
   BadRequestException,
   Logger,
 } from '@nestjs/common';
+import type { ConfigType } from '@nestjs/config';
+import type { Prisma } from 'src/generated/prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { NoteAccessService } from './note-access.service';
-import { NoteSharePermission, AttachmentType } from 'src/generated/prisma/enums';
 import {
-  ATTACHMENT_MAX_FILE_SIZE,
-  ATTACHMENT_ALLOWED_MIME_TYPES,
-} from '../constants/notes.constants';
+  SyncEmitterService,
+  attachmentsEmissions,
+  noteEmissions,
+} from '../../sync/sync-emitter.service';
+import { NoteSharePermission } from 'src/generated/prisma/enums';
+import { StorageConfig } from '../../config/configuration';
+import { deleteFileIfExists } from '../../common/utils/file-system.util';
+import {
+  assertValidAttachmentFile,
+  attachmentTypeForMime,
+  writeAttachmentFile,
+} from '../utils/attachment-storage.util';
 import { toAttachmentResponse } from '../dto/attachment-response.dto';
-import * as crypto from 'crypto';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { createReadStream, existsSync } from 'fs';
@@ -20,15 +30,39 @@ import { createReadStream, existsSync } from 'fs';
 @Injectable()
 export class NoteAttachmentsService {
   private readonly logger = new Logger(NoteAttachmentsService.name);
-  private readonly baseDir = '/data/uploads/attachments';
 
   constructor(
     private prisma: PrismaService,
     private noteAccessService: NoteAccessService,
-  ) { }
+    private syncEmitter: SyncEmitterService,
+    @Inject(StorageConfig.KEY)
+    private storageConfig: ConfigType<typeof StorageConfig>,
+  ) {}
+
+  private attachmentDir(noteId: string): string {
+    return path.join(this.storageConfig.attachmentsDir, noteId);
+  }
+
+  private async emitAttachmentChange(
+    tx: Prisma.TransactionClient,
+    noteId: string,
+  ): Promise<void> {
+    await tx.note.update({
+      where: { id: noteId },
+      data: { updatedAt: new Date() },
+    });
+    const recipients = await this.syncEmitter.noteRecipients(tx, noteId);
+    await this.syncEmitter.emit(tx, [
+      ...noteEmissions(recipients, noteId),
+      ...attachmentsEmissions(recipients, noteId),
+    ]);
+  }
+
+  private attachmentPath(noteId: string, storedFilename: string): string {
+    return path.join(this.storageConfig.attachmentsDir, noteId, storedFilename);
+  }
 
   async upload(userId: string, noteId: string, file: Express.Multer.File) {
-    // Require editor or owner access to upload
     await this.noteAccessService.ensureNoteAccess(
       userId,
       noteId,
@@ -36,35 +70,18 @@ export class NoteAttachmentsService {
     );
     await this.noteAccessService.ensureNoteIsActive(noteId);
 
-    if (!file) {
-      throw new BadRequestException('No file provided');
-    }
+    assertValidAttachmentFile(file);
 
-    if (!ATTACHMENT_ALLOWED_MIME_TYPES.has(file.mimetype)) {
-      throw new BadRequestException(`File type ${file.mimetype} is not allowed`);
-    }
+    const attachmentType = attachmentTypeForMime(file.mimetype);
 
-    if (file.size > ATTACHMENT_MAX_FILE_SIZE) {
-      throw new BadRequestException(
-        `File size exceeds ${ATTACHMENT_MAX_FILE_SIZE / 1024 / 1024}MB limit`,
-      );
-    }
-
-    const noteDir = path.join(this.baseDir, noteId);
-    await fs.mkdir(noteDir, { recursive: true });
-
-    const ext = path.extname(file.originalname).toLowerCase();
-    const storedFilename = `${crypto.randomUUID()}-${Date.now()}${ext}`;
-    const filePath = path.join(noteDir, storedFilename);
-
-    const attachmentType: AttachmentType = file.mimetype.startsWith('image/')
-      ? AttachmentType.image
-      : AttachmentType.audio;
-
-    let fileSaved = false;
+    let stored: { storedFilename: string; filePath: string } | null = null;
     try {
-      await fs.writeFile(filePath, file.buffer);
-      fileSaved = true;
+      stored = await writeAttachmentFile(
+        this.attachmentDir(noteId),
+        file.originalname,
+        file.buffer,
+      );
+      const { storedFilename } = stored;
 
       const attachment = await this.prisma.$transaction(async (tx) => {
         // Shift all existing attachments down to make room at position 0
@@ -73,7 +90,7 @@ export class NoteAttachmentsService {
           data: { position: { increment: 1 } },
         });
 
-        return tx.noteAttachment.create({
+        const created = await tx.noteAttachment.create({
           data: {
             noteId,
             uploadedByUserId: userId,
@@ -85,22 +102,16 @@ export class NoteAttachmentsService {
             position: 0,
           },
         });
-      });
 
-      // Touch the note so it appears in the sync feed for other clients
-      await this.prisma.note.update({
-        where: { id: noteId },
-        data: { updatedAt: new Date() },
+        await this.emitAttachmentChange(tx, noteId);
+
+        return created;
       });
 
       return toAttachmentResponse(attachment);
-    } catch (error) {
-      if (fileSaved) {
-        try {
-          await fs.unlink(filePath);
-        } catch (deleteError) {
-          this.logger.error(`Failed to delete file after DB error: ${filePath}`);
-        }
+    } catch {
+      if (stored) {
+        await deleteFileIfExists(stored.filePath, this.logger);
       }
       throw new BadRequestException('Failed to upload attachment');
     }
@@ -134,7 +145,7 @@ export class NoteAttachmentsService {
       throw new NotFoundException('Attachment not found');
     }
 
-    const filePath = path.join(this.baseDir, noteId, attachment.storedFilename);
+    const filePath = this.attachmentPath(noteId, attachment.storedFilename);
     if (!existsSync(filePath)) {
       throw new NotFoundException('Attachment file not found');
     }
@@ -169,29 +180,19 @@ export class NoteAttachmentsService {
       );
     }
 
-    await this.prisma.noteAttachment.delete({ where: { id: attachmentId } });
+    await this.prisma.$transaction(async (tx) => {
+      await tx.noteAttachment.delete({ where: { id: attachmentId } });
 
-    // Touch the note so it appears in the sync feed for other clients
-    await this.prisma.note.update({
-      where: { id: noteId },
-      data: { updatedAt: new Date() },
+      await this.emitAttachmentChange(tx, noteId);
     });
 
-    const filePath = path.join(this.baseDir, noteId, attachment.storedFilename);
-    try {
-      await fs.unlink(filePath);
-    } catch (error) {
-      // File may not exist, log only if it's not ENOENT
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        this.logger.error(`Failed to delete attachment file: ${filePath}`);
-      }
-    }
+    const filePath = this.attachmentPath(noteId, attachment.storedFilename);
+    await deleteFileIfExists(filePath, this.logger);
 
     return { success: true };
   }
 
   async reorder(userId: string, noteId: string, orderedIds: string[]) {
-    // Editor or owner can reorder
     await this.noteAccessService.ensureNoteAccess(
       userId,
       noteId,
@@ -215,32 +216,29 @@ export class NoteAttachmentsService {
       }
     }
 
-    await this.prisma.$transaction([
-      ...orderedIds.map((id, index) =>
-        this.prisma.noteAttachment.update({
+    await this.prisma.$transaction(async (tx) => {
+      for (const [index, id] of orderedIds.entries()) {
+        await tx.noteAttachment.update({
           where: { id },
           data: { position: index },
-        }),
-      ),
-      // Touch the note so it appears in the sync feed for other clients
-      this.prisma.note.update({
-        where: { id: noteId },
-        data: { updatedAt: new Date() },
-      }),
-    ]);
+        });
+      }
+
+      await this.emitAttachmentChange(tx, noteId);
+    });
 
     return this.findAll(userId, noteId);
   }
 
   async deleteAllForNote(noteId: string) {
-    const noteDir = path.join(this.baseDir, noteId);
+    const noteDir = this.attachmentDir(noteId);
     try {
       await fs.rm(noteDir, { recursive: true, force: true });
     } catch (error) {
       // Directory may not exist, log only if it's not ENOENT
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         this.logger.error(
-          `Failed to delete attachments directory for note ${noteId}: ${error}`,
+          `Failed to delete attachments directory for note ${noteId}: ${String(error)}`,
         );
       }
     }

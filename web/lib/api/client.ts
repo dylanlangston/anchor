@@ -1,40 +1,70 @@
 import ky, { HTTPError } from "ky";
-import { getAccessToken, clearAccessToken, getRefreshToken, setAccessToken, setRefreshToken, clearRefreshToken } from "@/features/auth";
 import type { RefreshTokenResponse } from "@/features/auth";
+import {
+  clearAccessToken,
+  clearRefreshToken,
+  getAccessToken,
+  getRefreshToken,
+  setAccessToken,
+  setRefreshToken,
+} from "@/features/auth";
 
-// Flag to prevent multiple simultaneous refresh attempts
-let isRefreshing = false;
-let refreshPromise: Promise<RefreshTokenResponse> | null = null;
+let refreshPromise: Promise<boolean> | null = null;
 
-// Function to refresh tokens (uses fetch to avoid circular dependencies)
-async function attemptTokenRefresh(): Promise<RefreshTokenResponse> {
+// Use fetch directly to avoid interceptor loops
+async function requestNewTokens(): Promise<RefreshTokenResponse> {
   const storedRefreshToken = getRefreshToken();
 
   if (!storedRefreshToken) {
-    throw new Error('No refresh token available');
+    throw new Error("No refresh token available");
   }
 
-  // Use fetch directly to avoid interceptor loops
-  const response = await fetch('/api/auth/refresh', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+  const response = await fetch("/api/auth/refresh", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ refresh_token: storedRefreshToken }),
   });
 
   if (!response.ok) {
-    throw new Error('Failed to refresh token');
+    throw new Error("Failed to refresh token");
   }
 
   return response.json();
 }
 
-// Create the API client with interceptors
+function signOut(): void {
+  clearAccessToken();
+  clearRefreshToken();
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("auth:unauthorized"));
+  }
+}
+
+async function runRefresh(): Promise<boolean> {
+  try {
+    const tokens = await requestNewTokens();
+    setAccessToken(tokens.access_token);
+    setRefreshToken(tokens.refresh_token);
+    return true;
+  } catch {
+    signOut();
+    return false;
+  } finally {
+    refreshPromise = null;
+  }
+}
+
+export function refreshAccessToken(): Promise<boolean> {
+  refreshPromise ??= runRefresh();
+  return refreshPromise;
+}
+
 export const api = ky.create({
-  prefixUrl: "/",
+  prefix: "/",
   timeout: 30000,
   hooks: {
     beforeRequest: [
-      (request) => {
+      ({ request }) => {
         const token = getAccessToken();
         if (token) {
           request.headers.set("Authorization", `Bearer ${token}`);
@@ -42,7 +72,7 @@ export const api = ky.create({
       },
     ],
     beforeError: [
-      async (error) => {
+      async ({ error }) => {
         // Extract error message from API response body
         if (error instanceof HTTPError) {
           try {
@@ -65,62 +95,22 @@ export const api = ky.create({
       },
     ],
     afterResponse: [
-      async (request, _options, response) => {
-        // Handle 401 errors - attempt token refresh
-        if (response.status === 401) {
-          // Don't try to refresh if we're already on the refresh endpoint
-          if (request.url.includes('/api/auth/refresh')) {
-            clearAccessToken();
-            clearRefreshToken();
-            if (typeof window !== "undefined") {
-              window.dispatchEvent(new CustomEvent("auth:unauthorized"));
-            }
-            return response;
-          }
-
-          try {
-            // If already refreshing, wait for that to complete
-            if (isRefreshing && refreshPromise) {
-              const newTokens = await refreshPromise;
-              setAccessToken(newTokens.access_token);
-              setRefreshToken(newTokens.refresh_token);
-
-              // Retry the original request with new token
-              request.headers.set("Authorization", `Bearer ${newTokens.access_token}`);
-              return ky(request);
-            }
-
-            // Start refresh process
-            isRefreshing = true;
-            refreshPromise = attemptTokenRefresh();
-
-            const newTokens = await refreshPromise;
-
-            // Store new tokens
-            setAccessToken(newTokens.access_token);
-            setRefreshToken(newTokens.refresh_token);
-
-            // Reset refresh state
-            isRefreshing = false;
-            refreshPromise = null;
-
-            // Retry the original request with new token
-            request.headers.set("Authorization", `Bearer ${newTokens.access_token}`);
-            return ky(request);
-
-          } catch (refreshError) {
-            // Refresh failed, clear all tokens and trigger logout
-            isRefreshing = false;
-            refreshPromise = null;
-            clearAccessToken();
-            clearRefreshToken();
-
-            if (typeof window !== "undefined") {
-              window.dispatchEvent(new CustomEvent("auth:unauthorized"));
-            }
-          }
+      async ({ request, response }) => {
+        if (response.status !== 401) {
+          return response;
         }
-        return response;
+
+        if (request.url.includes("/api/auth/refresh")) {
+          signOut();
+          return response;
+        }
+
+        if (!(await refreshAccessToken())) {
+          return response;
+        }
+
+        request.headers.set("Authorization", `Bearer ${getAccessToken()}`);
+        return ky(request);
       },
     ],
   },

@@ -10,25 +10,35 @@ Nest.js backend for Anchor application.
 ## Setup
 
 1.  Install dependencies:
+
     ```bash
     pnpm install
     ```
 
 2.  Set up environment variables:
     Copy `.env.example` to `.env` (if it exists) or ensure `.env` has:
+
     ```env
-    DATABASE_URL="postgresql://anchor:password@localhost:5432/anchor?schema=public"
-    JWT_SECRET="supersecretkey"
     PORT=3001
+    DATABASE_URL="postgresql://anchor:password@localhost:5432/anchor?schema=public"
+    JWT_SECRET="anchor-local-development-secret"
     ```
+
+    Environment variables are validated at startup (see `src/config/`), so the
+    app fails fast with a clear message if a required value is missing or
+    invalid. `DATABASE_URL` and `JWT_SECRET` are required; `JWT_SECRET` must be
+    at least 16 characters. Optional: `APP_URL`, `DATA_DIR` (uploads root,
+    defaults to `/data`), `CORS_ORIGINS` (comma-separated allowlist).
 
 3.  Start Database:
     From the project root:
+
     ```bash
     docker compose -f ../docker-compose.dev.yml up -d db
     ```
 
 4.  Generate Prisma Client:
+
     ```bash
     pnpm exec prisma generate
     ```
@@ -51,6 +61,15 @@ pnpm run start:dev
 pnpm run start:prod
 ```
 
+## Linting & Formatting
+
+This project uses ESLint (type-aware) + Prettier.
+
+```bash
+pnpm check        # ESLint + Prettier, read-only
+pnpm check:fix    # ESLint --fix + Prettier --write
+```
+
 ## Test
 
 ```bash
@@ -61,9 +80,14 @@ pnpm run test
 pnpm run test:e2e
 ```
 
+Unit specs are co-located with the code as `*.spec.ts`; e2e specs live in
+`test/` as `*.e2e-spec.ts`. Shared unit-test helpers (e.g. the Prisma mock)
+go in `test/` and are reused across specs.
+
 ## API Endpoints
 
 ### Auth
+
 - `GET /api/auth/registration-mode` - Get current registration mode (public)
 - `POST /api/auth/register` - Register a new user
 - `POST /api/auth/login` - Login
@@ -76,6 +100,7 @@ pnpm run test:e2e
 - `POST /api/auth/change-password` - Change password
 
 ### OIDC Authentication
+
 - `GET /api/auth/oidc/config` - Get OIDC configuration (public)
 - `GET /api/auth/oidc/initiate` - Initiate OIDC login flow (redirects to provider)
 - `GET /api/auth/oidc/callback` - OIDC callback (handles provider redirect)
@@ -83,6 +108,7 @@ pnpm run test:e2e
 - `POST /api/auth/oidc/exchange/mobile` - Exchange IdP access token for app tokens (mobile)
 
 ### Notes
+
 - `GET /api/notes` - Get all notes (supports `?search=term` and `?tagId=id`)
 - `GET /api/notes/trash` - Get all trashed notes
 - `GET /api/notes/archive` - Get all archived notes
@@ -90,13 +116,13 @@ pnpm run test:e2e
 - `GET /api/notes/:id` - Get a specific note
 - `PATCH /api/notes/:id` - Update a note
 - `DELETE /api/notes/:id` - Delete a note (soft delete)
-- `POST /api/notes/sync` - Sync notes with client
 - `PATCH /api/notes/:id/restore` - Restore a note from trash
 - `DELETE /api/notes/:id/permanent` - Permanently delete a note
 - `POST /api/notes/bulk/delete` - Bulk delete notes
 - `POST /api/notes/bulk/archive` - Bulk archive notes
 
 ### Note Attachments
+
 - `POST /api/notes/:noteId/attachments` - Upload an attachment (multipart/form-data)
 - `GET /api/notes/:noteId/attachments` - List all attachments for a note
 - `GET /api/notes/:noteId/attachments/:id` - Get attachment file (stream)
@@ -104,21 +130,34 @@ pnpm run test:e2e
 - `PATCH /api/notes/:noteId/attachments/reorder` - Reorder attachments (body: `{ orderedIds: string[] }`)
 
 ### Note Sharing
+
 - `POST /api/notes/:id/shares` - Share a note with a user
 - `GET /api/notes/:id/shares` - Get all shares for a note
 - `PATCH /api/notes/:id/shares/:shareId` - Update share permission
 - `DELETE /api/notes/:id/shares/:shareId` - Revoke a share
 
+### Import & Export
+
+- `GET /api/export` - Export the user's full library (notes, tags, attachments) as a streamed zip
+- `POST /api/import/notes` - Import notes from a parsed manifest (also used for Google Keep imports)
+- `POST /api/import/notes/:noteId/attachments` - Upload an attachment for an imported note (multipart/form-data)
+
 ### Tags
+
 - `GET /api/tags` - Get all tags
 - `POST /api/tags` - Create a tag
 - `GET /api/tags/:id` - Get a specific tag
 - `GET /api/tags/:id/notes` - Get all notes with a specific tag
 - `PATCH /api/tags/:id` - Update a tag
 - `DELETE /api/tags/:id` - Delete a tag
-- `POST /api/tags/sync` - Sync tags with client
+
+### Sync
+
+- `POST /api/sync` - Combined push + pull: applies client changes, returns the change feed past a cursor
+- `GET /api/sync/events` - SSE stream of `{ seq }` pokes telling clients when to pull
 
 ### Admin (requires admin privileges)
+
 - `GET /api/admin/stats` - Get server statistics
 - `GET /api/admin/settings/registration` - Get registration settings
 - `PATCH /api/admin/settings/registration` - Update registration mode (disabled if locked by env)
@@ -134,4 +173,5 @@ pnpm run test:e2e
 - `POST /api/admin/users/:id/reject` - Reject and delete a pending user
 
 ### Health
+
 - `GET /api/health` - Health check endpoint

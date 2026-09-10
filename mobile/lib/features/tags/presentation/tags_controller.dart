@@ -1,6 +1,8 @@
-import 'package:flutter/foundation.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:uuid/uuid.dart';
+
+import '../../../core/logging/app_logger.dart';
+import '../../../core/network/sync_requester.dart';
 import '../data/repository/tags_repository.dart';
 import '../domain/tag.dart';
 
@@ -10,16 +12,19 @@ part 'tags_controller.g.dart';
 class TagsController extends _$TagsController {
   @override
   Stream<List<Tag>> build() {
-    // Trigger initial sync
-    Future.microtask(() => sync());
     return ref.watch(tagsRepositoryProvider).watchTags();
   }
 
   Future<void> sync() async {
     try {
-      await ref.read(tagsRepositoryProvider).sync();
-    } catch (e) {
-      debugPrint('Tags sync error: $e');
+      await requestAppSync(trigger: 'TagsController.sync');
+    } catch (e, stack) {
+      AppLogger.instance.error(
+        'Tags',
+        'Sync request failed',
+        error: e,
+        stackTrace: stack,
+      );
     }
   }
 
@@ -45,7 +50,6 @@ class TagsController extends _$TagsController {
       id: const Uuid().v4(),
       name: trimmedName,
       color: color ?? generateRandomTagColor(),
-      updatedAt: DateTime.now(),
       isSynced: false,
     );
     // This now waits for server response when online
